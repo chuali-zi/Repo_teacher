@@ -1,0 +1,800 @@
+from __future__ import annotations
+
+import shutil
+from datetime import UTC, datetime
+from pathlib import PureWindowsPath
+from uuid import uuid4
+
+from backend.contracts.domain import (
+    ConversationState,
+    DegradationFlag,
+    EvidenceLine,
+    InitialReportContent,
+    InitialReportAnswer,
+    MessageRecord,
+    ProgressStepStateItem,
+    ReadPolicySnapshot,
+    RepositoryContext,
+    RuntimeEvent,
+    SessionContext,
+    SessionStore,
+    Suggestion,
+    StructuredAnswer,
+    StructuredMessageContent,
+    TempResourceSet,
+    UserFacingError,
+    UserFacingErrorException,
+)
+from backend.contracts.dto import (
+    ClearSessionData,
+    DegradationFlagDto,
+    MessageErrorStateDto,
+    MessageDto,
+    RepositorySummaryDto,
+    SendMessageData,
+    SessionSnapshotDto,
+    StructuredMessageContentDto,
+    SuggestionDto,
+    SubmitRepoData,
+    UserFacingErrorDto,
+    ValidateRepoData,
+)
+from backend.contracts.enums import (
+    CleanupStatus,
+    ClientView,
+    ConversationSubStatus,
+    DegradationType,
+    ErrorCode,
+    ConfidenceLevel,
+    LearningGoal,
+    MessageRole,
+    MessageType,
+    ProgressStepKey,
+    ProgressStepState,
+    RepoSourceType,
+    RuntimeEventType,
+    SessionStatus,
+    TeachingStage,
+)
+from backend.m1_repo_access import access_repository
+from backend.m1_repo_access.input_validator import classify_repo_input
+from backend.m2_file_tree.tree_scanner import scan_repository_tree
+from backend.m3_analysis import run_static_analysis
+from backend.m4_skeleton import assemble_teaching_skeleton
+from backend.m5_session.state_machine import (
+    assert_sub_status_allowed,
+    assert_transition_allowed,
+    view_for_status,
+)
+from backend.security.safety import build_default_read_policy
+
+
+def utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def new_id(prefix: str) -> str:
+    return f"{prefix}_{uuid4().hex[:12]}"
+
+
+def initial_progress_steps() -> list[ProgressStepStateItem]:
+    return [
+        ProgressStepStateItem(step_key=key, step_state=ProgressStepState.PENDING)
+        for key in (
+            ProgressStepKey.REPO_ACCESS,
+            ProgressStepKey.FILE_TREE_SCAN,
+            ProgressStepKey.ENTRY_AND_MODULE_ANALYSIS,
+            ProgressStepKey.DEPENDENCY_ANALYSIS,
+            ProgressStepKey.SKELETON_ASSEMBLY,
+            ProgressStepKey.INITIAL_REPORT_GENERATION,
+        )
+    ]
+
+
+class SessionService:
+    def __init__(self) -> None:
+        self.store = SessionStore(active_session=None)
+
+    def validate_repo_input(self, input_value: str) -> ValidateRepoData:
+        return classify_repo_input(input_value)
+
+    def create_repo_session(self, input_value: str) -> SubmitRepoData:
+        validation = self.validate_repo_input(input_value)
+        if not validation.is_valid or validation.normalized_input is None:
+            raise UserFacingErrorException(
+                self.invalid_request_error("请输入本地仓库绝对路径或 GitHub 公开仓库 URL")
+            )
+
+        self.clear_active_session()
+        now = utc_now()
+        session_id = new_id("sess")
+        repository = self._bootstrap_repository(validation, input_value)
+        context = SessionContext(
+            session_id=session_id,
+            status=SessionStatus.ACCESSING,
+            created_at=now,
+            updated_at=now,
+            repository=repository,
+            conversation=ConversationState(current_repo_id=repository.repo_id),
+            progress_steps=initial_progress_steps(),
+            temp_resources=TempResourceSet(
+                clone_dir=None,
+                cleanup_required=repository.source_type == RepoSourceType.GITHUB_URL,
+                cleanup_status=CleanupStatus.PENDING
+                if repository.source_type == RepoSourceType.GITHUB_URL
+                else CleanupStatus.NOT_NEEDED,
+            ),
+        )
+        assert_sub_status_allowed(context.status, context.conversation.sub_status)
+        self.store.active_session = context
+        return SubmitRepoData(
+            accepted=True,
+            status=context.status,
+            sub_status=context.conversation.sub_status,
+            view=view_for_status(context.status, context.conversation.sub_status),
+            repository=self._repository_summary(repository),
+            analysis_stream_url=f"/api/analysis/stream?session_id={session_id}",
+        )
+
+    def get_snapshot(self, session_id: str | None = None) -> SessionSnapshotDto:
+        session = self.store.active_session
+        if session is None:
+            return SessionSnapshotDto(
+                session_id=None,
+                status=SessionStatus.IDLE,
+                sub_status=None,
+                view=ClientView.INPUT,
+            )
+        self.assert_session_matches(session_id, allow_missing=True)
+        sub_status = session.conversation.sub_status
+        return SessionSnapshotDto(
+            session_id=session.session_id,
+            status=session.status,
+            sub_status=sub_status,
+            view=view_for_status(session.status, sub_status),
+            repository=self._repository_summary(session.repository) if session.repository else None,
+            progress_steps=session.progress_steps,
+            degradation_notices=[
+                DegradationFlagDto(
+                    degradation_id=item.degradation_id,
+                    type=item.type,
+                    reason=item.reason,
+                    user_notice=item.user_notice,
+                    related_paths=item.related_paths,
+                )
+                for item in session.active_degradations
+            ],
+            messages=[self._message_dto(item) for item in session.conversation.messages],
+            active_error=UserFacingErrorDto.from_domain(session.last_error)
+            if session.last_error
+            else None,
+        )
+
+    def accept_chat_message(self, session_id: str, message: str) -> SendMessageData:
+        session = self.assert_session_matches(session_id)
+        if not message.strip():
+            raise UserFacingErrorException(self.invalid_request_error("消息不能为空"))
+        if (
+            session.status != SessionStatus.CHATTING
+            or session.conversation.sub_status != ConversationSubStatus.WAITING_USER
+        ):
+            raise UserFacingErrorException(
+                UserFacingError(
+                    error_code=ErrorCode.INVALID_STATE,
+                    message="当前状态不允许发送消息",
+                    retryable=True,
+                    stage=session.status,
+                    input_preserved=True,
+                )
+            )
+        user_message_id = new_id("msg_user")
+        session.conversation.messages.append(
+            MessageRecord(
+                message_id=user_message_id,
+                role=MessageRole.USER,
+                message_type=MessageType.USER_QUESTION,
+                created_at=utc_now(),
+                raw_text=message,
+                streaming_complete=True,
+            )
+        )
+        session.conversation.sub_status = ConversationSubStatus.AGENT_THINKING
+        session.updated_at = utc_now()
+        return SendMessageData(
+            accepted=True,
+            status="chatting",
+            sub_status="agent_thinking",
+            user_message_id=user_message_id,
+            chat_stream_url=f"/api/chat/stream?session_id={session_id}",
+        )
+
+    def clear_session(self, session_id: str) -> ClearSessionData:
+        self.assert_session_matches(session_id)
+        self.clear_active_session()
+        return ClearSessionData(
+            status="idle",
+            sub_status=None,
+            view="input",
+            cleanup_completed=True,
+        )
+
+    def assert_session_matches(
+        self,
+        session_id: str | None,
+        *,
+        allow_missing: bool = False,
+    ) -> SessionContext:
+        session = self.store.active_session
+        if session is None:
+            raise UserFacingErrorException(
+                UserFacingError(
+                    error_code=ErrorCode.INVALID_STATE,
+                    message="当前没有活跃会话",
+                    retryable=True,
+                    stage=SessionStatus.IDLE,
+                    input_preserved=True,
+                )
+            )
+        if session_id is None and allow_missing:
+            return session
+        if session_id != session.session_id:
+            raise UserFacingErrorException(
+                UserFacingError(
+                    error_code=ErrorCode.INVALID_STATE,
+                    message="会话已失效，请刷新后重试",
+                    retryable=True,
+                    stage=session.status,
+                    input_preserved=True,
+                )
+            )
+        return session
+
+    def clear_active_session(self) -> None:
+        active = self.store.active_session
+        if active and active.temp_resources and active.temp_resources.cleanup_required:
+            self._cleanup_temp_resources(active.temp_resources)
+        self.store.active_session = None
+
+    def run_initial_analysis(self, session_id: str) -> list[RuntimeEvent]:
+        session = self.assert_session_matches(session_id)
+        if (
+            session.status == SessionStatus.CHATTING
+            and self.latest_initial_report_completed_event(session_id)
+        ):
+            return []
+
+        start_index = len(session.runtime_events)
+        try:
+            self._set_progress_step(
+                session,
+                ProgressStepKey.REPO_ACCESS,
+                ProgressStepState.RUNNING,
+                "正在验证仓库访问...",
+            )
+            repository, temp_resources = access_repository(
+                session.repository.input_value,
+                session.repository.read_policy,
+            )
+            repository.repo_id = session.repository.repo_id
+            session.repository = repository
+            session.temp_resources = temp_resources
+            self._set_progress_step(
+                session,
+                ProgressStepKey.REPO_ACCESS,
+                ProgressStepState.DONE,
+                "仓库访问验证完成",
+            )
+
+            self._transition_status(session, SessionStatus.ANALYZING)
+
+            file_tree = scan_repository_tree(repository)
+            session.file_tree = file_tree
+            session.repository.primary_language = file_tree.primary_language
+            session.repository.repo_size_level = file_tree.repo_size_level
+            session.repository.source_code_file_count = file_tree.source_code_file_count
+            self._set_progress_step(
+                session,
+                ProgressStepKey.FILE_TREE_SCAN,
+                ProgressStepState.DONE,
+                "文件树扫描完成",
+            )
+
+            degradation = self._maybe_create_degradation(file_tree)
+            if degradation is not None:
+                session.active_degradations = [degradation]
+                self._append_runtime_event(
+                    session,
+                    RuntimeEventType.DEGRADATION_NOTICE,
+                    degradation=degradation,
+                )
+
+            analysis = run_static_analysis(repository, file_tree)
+            session.analysis = analysis
+            self._set_progress_step(
+                session,
+                ProgressStepKey.ENTRY_AND_MODULE_ANALYSIS,
+                ProgressStepState.DONE,
+                "入口与模块分析完成",
+            )
+            self._set_progress_step(
+                session,
+                ProgressStepKey.DEPENDENCY_ANALYSIS,
+                ProgressStepState.DONE,
+                "依赖来源分析完成",
+            )
+
+            skeleton = assemble_teaching_skeleton(analysis)
+            session.teaching_skeleton = skeleton
+            self._set_progress_step(
+                session,
+                ProgressStepKey.SKELETON_ASSEMBLY,
+                ProgressStepState.DONE,
+                "教学骨架组装完成",
+            )
+
+            initial_answer = self._build_initial_report_answer(session)
+            self._set_progress_step(
+                session,
+                ProgressStepKey.INITIAL_REPORT_GENERATION,
+                ProgressStepState.DONE,
+                "首轮报告生成完成",
+            )
+            self._transition_status(
+                session,
+                SessionStatus.CHATTING,
+                ConversationSubStatus.WAITING_USER,
+            )
+            self._emit_answer_events(
+                session,
+                initial_answer.answer_id,
+                initial_answer.message_type,
+                initial_answer.raw_text,
+            )
+            self._complete_initial_report(session, initial_answer)
+            return session.runtime_events[start_index:]
+        except UserFacingErrorException as exc:
+            error_status = (
+                SessionStatus.ACCESS_ERROR
+                if session.status == SessionStatus.ACCESSING
+                else SessionStatus.ANALYSIS_ERROR
+            )
+            session.last_error = exc.error
+            self._transition_status(session, error_status)
+            self._append_runtime_event(
+                session,
+                RuntimeEventType.ERROR,
+                error=exc.error,
+            )
+            return session.runtime_events[start_index:]
+        except Exception as exc:
+            error = self.analysis_failed_error(exc, stage=session.status)
+            error_status = (
+                SessionStatus.ACCESS_ERROR
+                if session.status == SessionStatus.ACCESSING
+                else SessionStatus.ANALYSIS_ERROR
+            )
+            session.last_error = error
+            self._transition_status(session, error_status)
+            self._append_runtime_event(
+                session,
+                RuntimeEventType.ERROR,
+                error=error,
+            )
+            return session.runtime_events[start_index:]
+
+    def run_chat_turn(self, session_id: str) -> list[RuntimeEvent]:
+        session = self.assert_session_matches(session_id)
+        start_index = len(session.runtime_events)
+        if (
+            session.status != SessionStatus.CHATTING
+            or session.conversation.sub_status != ConversationSubStatus.AGENT_THINKING
+        ):
+            return []
+
+        answer = self._build_followup_answer(session)
+        self._transition_status(
+            session,
+            SessionStatus.CHATTING,
+            ConversationSubStatus.AGENT_STREAMING,
+        )
+        self._emit_answer_events(session, answer.answer_id, answer.message_type, answer.raw_text)
+        message = MessageRecord(
+            message_id=answer.answer_id,
+            role=MessageRole.AGENT,
+            message_type=answer.message_type,
+            created_at=utc_now(),
+            raw_text=answer.raw_text,
+            structured_content=answer.structured_content,
+            related_goal=session.conversation.current_learning_goal,
+            suggestions=answer.suggestions,
+            streaming_complete=True,
+        )
+        session.conversation.messages.append(message)
+        session.conversation.last_suggestions = answer.suggestions
+        session.conversation.current_stage = TeachingStage.STRUCTURE_OVERVIEW
+        self._transition_status(session, SessionStatus.CHATTING, ConversationSubStatus.WAITING_USER)
+        self._append_runtime_event(
+            session,
+            RuntimeEventType.MESSAGE_COMPLETED,
+            message_id=message.message_id,
+            payload={"message": message.model_dump(mode="python")},
+        )
+        return session.runtime_events[start_index:]
+
+    def build_status_snapshot_event(self, session: SessionContext) -> RuntimeEvent:
+        return RuntimeEvent(
+            event_id=new_id("evt"),
+            session_id=session.session_id,
+            event_type=RuntimeEventType.STATUS_CHANGED,
+            occurred_at=session.updated_at,
+            status_snapshot=session.status,
+            sub_status_snapshot=session.conversation.sub_status,
+        )
+
+    def latest_runtime_event(
+        self,
+        session_id: str,
+        event_type: RuntimeEventType,
+    ) -> RuntimeEvent | None:
+        session = self.assert_session_matches(session_id)
+        for event in reversed(session.runtime_events):
+            if event.event_type == event_type:
+                return event
+        return None
+
+    def latest_initial_report_completed_event(self, session_id: str) -> RuntimeEvent | None:
+        session = self.assert_session_matches(session_id)
+        for event in reversed(session.runtime_events):
+            if event.event_type != RuntimeEventType.MESSAGE_COMPLETED or not event.payload:
+                continue
+            payload = event.payload.get("message")
+            if payload and payload.get("message_type") == MessageType.INITIAL_REPORT:
+                return event
+        return None
+
+    def latest_chat_terminal_event(self, session_id: str) -> RuntimeEvent | None:
+        session = self.assert_session_matches(session_id)
+        for event in reversed(session.runtime_events):
+            if event.event_type == RuntimeEventType.ERROR:
+                return event
+            if event.event_type != RuntimeEventType.MESSAGE_COMPLETED or not event.payload:
+                continue
+            payload = event.payload.get("message")
+            if payload and payload.get("message_type") in {
+                MessageType.AGENT_ANSWER,
+                MessageType.GOAL_SWITCH_CONFIRMATION,
+                MessageType.STAGE_SUMMARY,
+                MessageType.ERROR,
+            }:
+                return event
+        return None
+
+    def invalid_request_error(self, message: str) -> UserFacingError:
+        active = self.store.active_session
+        return UserFacingError(
+            error_code=ErrorCode.INVALID_REQUEST,
+            message=message,
+            retryable=True,
+            stage=active.status if active else SessionStatus.IDLE,
+            input_preserved=True,
+        )
+
+    def analysis_failed_error(self, exc: Exception, *, stage: SessionStatus) -> UserFacingError:
+        return UserFacingError(
+            error_code=ErrorCode.ANALYSIS_FAILED,
+            message="分析过程出错，请重试或尝试其他仓库",
+            retryable=True,
+            stage=stage,
+            input_preserved=True,
+            internal_detail=str(exc),
+        )
+
+    def _bootstrap_repository(
+        self,
+        validation: ValidateRepoData,
+        raw_input: str,
+    ) -> RepositoryContext:
+        source_type = (
+            RepoSourceType.GITHUB_URL
+            if validation.input_kind == "github_url"
+            else RepoSourceType.LOCAL_PATH
+        )
+        display_name, owner, name = self._display_name_parts(raw_input, source_type)
+        read_policy: ReadPolicySnapshot = build_default_read_policy()
+        return RepositoryContext(
+            repo_id=new_id("repo"),
+            source_type=source_type,
+            display_name=display_name,
+            input_value=raw_input,
+            root_path=validation.normalized_input or raw_input,
+            is_temp_dir=source_type == RepoSourceType.GITHUB_URL,
+            owner=owner,
+            name=name,
+            access_verified=False,
+            read_policy=read_policy,
+        )
+
+    def _display_name_parts(
+        self,
+        input_value: str,
+        source_type: RepoSourceType,
+    ) -> tuple[str, str | None, str | None]:
+        if source_type == RepoSourceType.GITHUB_URL:
+            parts = input_value.rstrip("/").removesuffix(".git").split("/")
+            owner = parts[-2] if len(parts) >= 2 else None
+            name = parts[-1] if parts else input_value
+            display = f"{owner}/{name}" if owner else name
+            return display, owner, name
+        name = PureWindowsPath(input_value).name or input_value
+        return name, None, name
+
+    def _repository_summary(self, repository: RepositoryContext) -> RepositorySummaryDto:
+        return RepositorySummaryDto(
+            display_name=repository.display_name,
+            source_type=repository.source_type,
+            input_value=repository.input_value,
+            primary_language=repository.primary_language,
+            repo_size_level=repository.repo_size_level,
+            source_code_file_count=repository.source_code_file_count,
+        )
+
+    def _message_dto(self, message: MessageRecord) -> MessageDto:
+        return MessageDto(
+            message_id=message.message_id,
+            role=message.role,
+            message_type=message.message_type,
+            created_at=message.created_at,
+            raw_text=message.raw_text,
+            structured_content=(
+                StructuredMessageContentDto.model_validate(
+                    message.structured_content.model_dump(mode="python")
+                )
+                if message.structured_content
+                else None
+            ),
+            initial_report_content=(
+                message.initial_report_content.model_dump(mode="python")
+                if message.initial_report_content
+                else None
+            ),
+            related_goal=message.related_goal,
+            suggestions=[
+                SuggestionDto.model_validate(item.model_dump(mode="python"))
+                for item in message.suggestions
+            ],
+            streaming_complete=message.streaming_complete,
+            error_state=(
+                MessageErrorStateDto(
+                    error=UserFacingErrorDto.from_domain(message.error_state.error),
+                    failed_during_stream=message.error_state.failed_during_stream,
+                    partial_text_available=message.error_state.partial_text_available,
+                )
+                if message.error_state
+                else None
+            ),
+        )
+
+    def _transition_status(
+        self,
+        session: SessionContext,
+        status: SessionStatus,
+        sub_status: ConversationSubStatus | None = None,
+    ) -> None:
+        assert_transition_allowed(session.status, status)
+        session.status = status
+        session.conversation.sub_status = sub_status
+        assert_sub_status_allowed(session.status, session.conversation.sub_status)
+        session.updated_at = utc_now()
+        self._append_runtime_event(session, RuntimeEventType.STATUS_CHANGED)
+
+    def _set_progress_step(
+        self,
+        session: SessionContext,
+        step_key: ProgressStepKey,
+        step_state: ProgressStepState,
+        user_notice: str,
+    ) -> None:
+        for item in session.progress_steps:
+            if item.step_key == step_key:
+                item.step_state = step_state
+                break
+        session.updated_at = utc_now()
+        self._append_runtime_event(
+            session,
+            RuntimeEventType.ANALYSIS_PROGRESS,
+            step_key=step_key,
+            step_state=step_state,
+            user_notice=user_notice,
+            payload={
+                "progress_steps": [
+                    item.model_dump(mode="python") for item in session.progress_steps
+                ]
+            },
+        )
+
+    def _append_runtime_event(
+        self,
+        session: SessionContext,
+        event_type: RuntimeEventType,
+        *,
+        step_key: ProgressStepKey | None = None,
+        step_state: ProgressStepState | None = None,
+        message_id: str | None = None,
+        message_chunk: str | None = None,
+        structured_delta: dict | None = None,
+        user_notice: str | None = None,
+        error: UserFacingError | None = None,
+        degradation: DegradationFlag | None = None,
+        payload: dict | None = None,
+    ) -> RuntimeEvent:
+        event = RuntimeEvent(
+            event_id=new_id("evt"),
+            session_id=session.session_id,
+            event_type=event_type,
+            occurred_at=utc_now(),
+            status_snapshot=session.status,
+            sub_status_snapshot=session.conversation.sub_status,
+            step_key=step_key,
+            step_state=step_state,
+            message_id=message_id,
+            message_chunk=message_chunk,
+            structured_delta=structured_delta,
+            user_notice=user_notice,
+            error=error,
+            degradation=degradation,
+            payload=payload,
+        )
+        session.runtime_events.append(event)
+        session.updated_at = event.occurred_at
+        return event
+
+    def _emit_answer_events(
+        self,
+        session: SessionContext,
+        message_id: str,
+        message_type: MessageType,
+        raw_text: str,
+    ) -> None:
+        self._append_runtime_event(
+            session,
+            RuntimeEventType.ANSWER_STREAM_START,
+            message_id=message_id,
+            payload={"message_type": message_type},
+        )
+        for chunk in self._chunk_text(raw_text):
+            self._append_runtime_event(
+                session,
+                RuntimeEventType.ANSWER_STREAM_DELTA,
+                message_id=message_id,
+                message_chunk=chunk,
+            )
+        self._append_runtime_event(
+            session,
+            RuntimeEventType.ANSWER_STREAM_END,
+            message_id=message_id,
+        )
+
+    def _chunk_text(self, text: str, size: int = 80) -> list[str]:
+        return [text[index : index + size] for index in range(0, len(text), size)] or [""]
+
+    def _maybe_create_degradation(self, file_tree) -> DegradationFlag | None:
+        if file_tree.repo_size_level == "large":
+            return DegradationFlag(
+                degradation_id=new_id("deg"),
+                type=DegradationType.LARGE_REPO,
+                reason="source_code_file_count > 3000",
+                user_notice="仓库较大，优先输出结构总览和阅读起点。",
+                started_at=utc_now(),
+            )
+        if file_tree.primary_language != "Python":
+            return DegradationFlag(
+                degradation_id=new_id("deg"),
+                type=DegradationType.NON_PYTHON_REPO,
+                reason="primary_language != Python",
+                user_notice="当前仓库不是 Python 主仓库，仅提供保守结构说明。",
+                started_at=utc_now(),
+            )
+        return None
+
+    def _build_initial_report_answer(self, session: SessionContext) -> InitialReportAnswer:
+        skeleton = session.teaching_skeleton
+        raw_text = (
+            f"已完成对 {session.repository.display_name} 的基础接入。"
+            f"当前建议先阅读 {skeleton.recommended_first_step.target}，从整体结构与入口线索开始理解。"
+        )
+        return InitialReportAnswer(
+            answer_id=new_id("msg_agent_init"),
+            message_type=MessageType.INITIAL_REPORT,
+            raw_text=raw_text,
+            initial_report_content=InitialReportContent(
+                overview=skeleton.overview,
+                focus_points=skeleton.focus_points,
+                repo_mapping=skeleton.repo_mapping,
+                language_and_type=skeleton.language_and_type,
+                key_directories=skeleton.key_directories,
+                entry_section=skeleton.entry_section,
+                recommended_first_step=skeleton.recommended_first_step,
+                reading_path_preview=skeleton.reading_path_preview,
+                unknown_section=skeleton.unknown_section,
+                suggested_next_questions=skeleton.suggested_next_questions,
+            ),
+            suggestions=skeleton.suggested_next_questions,
+        )
+
+    def _complete_initial_report(
+        self,
+        session: SessionContext,
+        answer: InitialReportAnswer,
+    ) -> None:
+        message = MessageRecord(
+            message_id=answer.answer_id,
+            role=MessageRole.AGENT,
+            message_type=answer.message_type,
+            created_at=utc_now(),
+            raw_text=answer.raw_text,
+            initial_report_content=answer.initial_report_content,
+            related_goal=LearningGoal.OVERVIEW,
+            suggestions=answer.suggestions,
+            streaming_complete=True,
+        )
+        session.conversation.messages.append(message)
+        session.conversation.last_suggestions = answer.suggestions
+        session.conversation.current_stage = TeachingStage.INITIAL_REPORT
+        self._append_runtime_event(
+            session,
+            RuntimeEventType.MESSAGE_COMPLETED,
+            message_id=message.message_id,
+            payload={"message": message.model_dump(mode="python")},
+        )
+
+    def _build_followup_answer(self, session: SessionContext) -> StructuredAnswer:
+        last_user_message = next(
+            item
+            for item in reversed(session.conversation.messages)
+            if item.role == MessageRole.USER
+        )
+        suggestions = [
+            Suggestion(
+                suggestion_id=new_id("sug"),
+                text="继续展开这个模块与入口的关系。",
+                target_goal=LearningGoal.MODULE,
+            )
+        ]
+        raw_text = (
+            f"你刚才问的是：{last_user_message.raw_text.strip()}。"
+            f"基于当前会话，我建议先围绕 {session.repository.display_name} 的结构线索继续定位相关模块。"
+        )
+        return StructuredAnswer(
+            answer_id=new_id("msg_agent"),
+            message_type=MessageType.AGENT_ANSWER,
+            raw_text=raw_text,
+            structured_content=StructuredMessageContent(
+                focus="围绕当前提问给出保守解释。",
+                direct_explanation=raw_text,
+                relation_to_overall="回答基于当前已缓存的仓库概览与结构线索。",
+                evidence_lines=[
+                    EvidenceLine(
+                        text="当前回答来自会话内已缓存的仓库结构、静态分析和教学骨架。",
+                        evidence_refs=[],
+                        confidence=ConfidenceLevel.UNKNOWN,
+                    )
+                ],
+                uncertainties=["更细粒度事实仍依赖后续 M2-M4/M6 实现补齐。"],
+                next_steps=suggestions,
+            ),
+            suggestions=suggestions,
+        )
+
+    def _cleanup_temp_resources(self, temp_resources: TempResourceSet) -> None:
+        if not temp_resources.clone_dir:
+            temp_resources.cleanup_status = CleanupStatus.COMPLETED
+            return
+        try:
+            shutil.rmtree(temp_resources.clone_dir, ignore_errors=False)
+            temp_resources.cleanup_status = CleanupStatus.COMPLETED
+        except OSError as exc:
+            temp_resources.cleanup_status = CleanupStatus.FAILED
+            temp_resources.cleanup_error = str(exc)
+
+
+session_service = SessionService()
