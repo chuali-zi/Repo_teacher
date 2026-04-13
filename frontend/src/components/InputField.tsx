@@ -3,6 +3,7 @@ type InputFieldProps = {
   disabled?: boolean;
   placeholder: string;
   onChange(value: string): void;
+  onBlur?(): void;
   onEnter?(): void;
 };
 
@@ -11,6 +12,7 @@ export function InputField({
   disabled = false,
   placeholder,
   onChange,
+  onBlur,
   onEnter
 }: InputFieldProps) {
   return (
@@ -20,6 +22,7 @@ export function InputField({
       placeholder={placeholder}
       value={value}
       onChange={(event) => onChange(event.target.value)}
+      onBlur={() => onBlur?.()}
       onKeyDown={(event) => {
         if (event.key === 'Enter') {
           onEnter?.();
@@ -28,4 +31,3 @@ export function InputField({
     />
   );
 }
-

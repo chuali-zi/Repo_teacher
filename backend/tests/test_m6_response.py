@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
+
+import pytest
 
 from backend.contracts.domain import (
     ConfidenceLevel,
@@ -37,6 +40,7 @@ from backend.contracts.enums import (
     TeachingStage,
     TopicRefType,
 )
+from backend.m6_response.llm_caller import load_llm_config
 from backend.m6_response.prompt_builder import build_prompt
 from backend.m6_response.response_parser import parse_final_answer
 from backend.m6_response.suggestion_generator import generate_next_step_suggestions
@@ -161,6 +165,40 @@ def test_parse_initial_report_uses_controlled_payload() -> None:
     assert answer.message_type == "initial_report"
     assert answer.initial_report_content.overview.summary == "这是一个后端 API 服务。"
     assert answer.initial_report_content.recommended_first_step.target == "backend/main.py"
+
+
+def test_load_llm_config_reads_visible_json_file(tmp_path: Path) -> None:
+    config_path = tmp_path / "llm_config.json"
+    config_path.write_text(
+        '{"api_key":"demo-key","base_url":"https://example.com","model":"demo-model","timeout_seconds":12}',
+        encoding="utf-8",
+    )
+
+    config = load_llm_config(config_path)
+
+    assert config.api_key == "demo-key"
+    assert config.base_url == "https://example.com"
+    assert config.model == "demo-model"
+    assert config.timeout_seconds == 12.0
+
+
+def test_load_llm_config_requires_api_key(tmp_path: Path) -> None:
+    config_path = tmp_path / "llm_config.json"
+    config_path.write_text('{"api_key":""}', encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="api_key"):
+        load_llm_config(config_path)
+
+
+def test_load_llm_config_uses_defaults_for_optional_fields(tmp_path: Path) -> None:
+    config_path = tmp_path / "llm_config.json"
+    config_path.write_text('{"api_key":"demo-key"}', encoding="utf-8")
+
+    config = load_llm_config(config_path)
+
+    assert config.base_url == "https://api.deepseek.com"
+    assert config.model == "deepseek-chat"
+    assert config.timeout_seconds == 60.0
 
 
 def test_generate_next_step_suggestions_skips_explained_and_limits_to_three() -> None:

@@ -23,6 +23,12 @@ code.
 - `docs/`: Product, architecture, data structure, and API specifications.
 - `scripts/`: Windows helper scripts for local backend/frontend startup.
 
+## Usage Guide
+
+- User-facing setup and operation guide: `docs/USAGE_GUIDE.md`
+- Current implementation scope and verification status: this `README.md`
+- Normative product/interface constraints: `docs/CURRENT_SPEC.md` and the spec set it points to
+
 ## Backend Status
 
 The backend is no longer only a scaffold. The current implementation includes:
@@ -41,6 +47,24 @@ Important runtime constraints:
 - Sensitive files may be reported as present, but their body is not read into analysis, SSE, DTOs, logs, or prompts.
 - The app keeps only one in-memory active session and does not use a database.
 - Multi-turn chat currently uses a deterministic structured fallback in M5. M6 has prompt/parser/LLM utilities, but full live LLM orchestration is still a follow-up integration step.
+
+## Frontend Status
+
+The frontend is now implemented as a working React + TypeScript SPA aligned to the
+current DTO/SSE contract. The current implementation includes:
+
+- Input view with format validation messaging for local absolute paths and public GitHub URLs.
+- Analysis view with server-driven progress rendering, degradation notices, timeout notice, and clear-session flow.
+- Chat view with structured initial report rendering, structured multi-turn answer rendering, per-answer suggestion actions, and disabled-state mapping from `status + sub_status`.
+- API client + SSE client wiring for `GET /api/session`, repo submit, chat submit, analysis stream, chat stream, and session clearing.
+- Session recovery on page load through `GET /api/session`, including reconnecting analysis/chat SSE when the server reports an in-flight session.
+
+Frontend behavior constraints:
+
+- Frontend view state, disabled state, errors, and degradation messaging are driven by server DTOs or SSE events.
+- Initial report rendering follows the `initial_report_content` section order from the interface spec.
+- Multi-turn answer rendering follows the `structured_content` field order from the interface spec.
+- Old SSE connections are closed on repo switch, reconnect, and unmount.
 
 ## Backend API
 
@@ -69,9 +93,25 @@ Using the existing Windows helper:
 scripts\dev_backend.cmd
 ```
 
-GitHub repository input requires `git` on PATH. Live M6 LLM calls require either
-`DEEPSEEK_API_KEY` or `OPENAI_API_KEY`; optional overrides are `M6_LLM_BASE_URL`,
-`M6_LLM_MODEL`, and `M6_LLM_TIMEOUT_SECONDS`.
+GitHub repository input requires `git` on PATH. Live M6 LLM calls now read from
+the visible root config file `llm_config.json` instead of environment variables.
+
+Example:
+
+```json
+{
+  "api_key": "your_key_here",
+  "base_url": "https://api.deepseek.com",
+  "model": "deepseek-chat",
+  "timeout_seconds": 60
+}
+```
+
+Rules:
+
+- `api_key` is required.
+- `base_url`, `model`, and `timeout_seconds` are optional and fall back to defaults.
+- If `llm_config.json` is missing or `api_key` is empty, M6 LLM calls will fail fast with a user-facing runtime error.
 
 ## Frontend Setup
 
@@ -111,6 +151,37 @@ Current backend verification after this audit:
 `python -m compileall -q backend` also passes. `ruff` is listed in the dev
 extras but was not available on the current PATH during this audit.
 
+Current frontend verification:
+
+```bash
+cd frontend
+npm run build
+```
+
+This currently passes and produces a production bundle in `frontend/dist/`.
+
+Current end-to-end integration verification:
+
+- Backend and frontend local dev servers can be started together on `127.0.0.1:8000` and `127.0.0.1:5173`.
+- Vite `/api` proxy forwards correctly to the FastAPI backend in local development.
+- Verified end-to-end flow: repo validate -> repo submit -> analysis SSE -> session snapshot recovery -> chat submit -> chat SSE -> session clear.
+- Verified DTO/SSE behavior: initial report returns `initial_report_content`, follow-up answer returns `structured_content`, and session cleanup returns the app to `idle/input`.
+
+Known integration note:
+
+- In the current Windows PowerShell + `curl.exe` environment, directly posting Chinese JSON text may hit shell encoding/escaping issues and surface as `invalid_request`. Browser `fetch` and PowerShell `Invoke-RestMethod` based requests were verified successfully.
+
+## Quick Start
+
+1. Start the backend on `127.0.0.1:8000`.
+2. Start the frontend dev server on `127.0.0.1:5173`.
+3. Open `http://127.0.0.1:5173` in the browser.
+4. Enter a local absolute repo path or a public GitHub repo URL.
+5. Wait for the analysis stream to complete and review the first report.
+6. Continue asking follow-up questions in chat, or click suggestion buttons.
+
+For detailed daily usage, troubleshooting, and recommended workflows, see `docs/USAGE_GUIDE.md`.
+
 ## Audit Notes
 
 This backend audit found and corrected several integration risks:
@@ -131,3 +202,4 @@ This backend audit found and corrected several integration risks:
 - M1-M4 produce deterministic facts and must not call LLMs.
 - Sensitive files may be recorded as existing, but their content must not be read or sent to M6.
 - Frontend view state must come from server DTOs or SSE events, not local inference.
+- For implementation status and currently completed frontend/backend scope, use this `README.md` as the latest source of truth.

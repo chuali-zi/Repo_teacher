@@ -20,14 +20,15 @@ export function ChatInput({ disabled, placeholder, onSend }: ChatInputProps) {
 
   return (
     <div className="chat-input">
-      <input
+      <textarea
         className="input"
         disabled={disabled}
         placeholder={placeholder}
         value={message}
         onChange={(event) => setMessage(event.target.value)}
         onKeyDown={(event) => {
-          if (event.key === 'Enter') {
+          if (event.key === 'Enter' && !event.shiftKey) {
+            event.preventDefault();
             void submit();
           }
         }}
@@ -38,4 +39,3 @@ export function ChatInput({ disabled, placeholder, onSend }: ChatInputProps) {
     </div>
   );
 }
-

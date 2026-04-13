@@ -89,6 +89,33 @@ def test_chat_stream_completes_followup_answer(tmp_path: Path) -> None:
     session_service.clear_active_session()
 
 
+def test_chat_stream_completes_consecutive_followup_answers(tmp_path: Path) -> None:
+    (tmp_path / "README.md").write_text("# demo\n", encoding="utf-8")
+    (tmp_path / "app.py").write_text("print('hi')\n", encoding="utf-8")
+
+    session_service.create_repo_session(str(tmp_path))
+    session_id = session_service.store.active_session.session_id
+    asyncio.run(_collect(iter_analysis_events(session_id)))
+
+    for index in range(1, 4):
+        session_service.accept_chat_message(session_id, f"q{index}")
+        events = asyncio.run(_collect(iter_chat_events(session_id)))
+        snapshot = session_service.get_snapshot(session_id)
+
+        assert any(event.event_type == RuntimeEventType.ANSWER_STREAM_START for event in events)
+        assert events[-1].event_type == RuntimeEventType.MESSAGE_COMPLETED
+        assert events[-1].message.message_type == MessageType.AGENT_ANSWER
+        assert snapshot.sub_status == ConversationSubStatus.WAITING_USER
+
+    snapshot = session_service.get_snapshot(session_id)
+    agent_answers = [
+        message for message in snapshot.messages if message.message_type == MessageType.AGENT_ANSWER
+    ]
+    assert len(agent_answers) == 3
+
+    session_service.clear_active_session()
+
+
 def test_analysis_stream_reconnect_returns_final_message_then_closes(tmp_path: Path) -> None:
     (tmp_path / "README.md").write_text("# demo\n", encoding="utf-8")
     session_service.create_repo_session(str(tmp_path))

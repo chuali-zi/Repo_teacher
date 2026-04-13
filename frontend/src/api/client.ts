@@ -90,7 +90,11 @@ export const streamClient: StreamClient = {
   connectAnalysis(sessionId: string, onEvent: (evt: AnalysisSseEvent) => void): CloseFn {
     const source = new EventSource(`/api/analysis/stream?session_id=${encodeURIComponent(sessionId)}`);
     analysisEventNames.forEach((eventName) => {
-      source.addEventListener(eventName, (raw) => onEvent(JSON.parse(raw.data) as AnalysisSseEvent));
+      source.addEventListener(eventName, (raw) => {
+        const event = JSON.parse(raw.data) as AnalysisSseEvent;
+        onEvent(event);
+        closeOnTerminalEvent(source, event);
+      });
     });
     return () => source.close();
   },
@@ -98,9 +102,21 @@ export const streamClient: StreamClient = {
   connectChat(sessionId: string, onEvent: (evt: ChatSseEvent) => void): CloseFn {
     const source = new EventSource(`/api/chat/stream?session_id=${encodeURIComponent(sessionId)}`);
     chatEventNames.forEach((eventName) => {
-      source.addEventListener(eventName, (raw) => onEvent(JSON.parse(raw.data) as ChatSseEvent));
+      source.addEventListener(eventName, (raw) => {
+        const event = JSON.parse(raw.data) as ChatSseEvent;
+        onEvent(event);
+        closeOnTerminalEvent(source, event);
+      });
     });
     return () => source.close();
   }
 };
 
+function closeOnTerminalEvent(
+  source: EventSource,
+  event: AnalysisSseEvent | ChatSseEvent
+): void {
+  if (event.event_type === 'message_completed' || event.event_type === 'error') {
+    source.close();
+  }
+}

@@ -6,7 +6,12 @@ import { RepoInputView } from './views/RepoInputView';
 export default function App() {
   const session = useSession();
   const { store } = session;
-  const validationMessage = session.validation?.is_valid === false ? session.validation.message : null;
+  const validationMessage =
+    session.validation?.is_valid === false
+      ? session.validation.message
+      : store.currentView === 'input'
+        ? store.activeError?.message ?? null
+        : null;
 
   if (store.currentView === 'analysis') {
     return <AnalysisProgressView store={store} onClear={session.clearSession} />;
@@ -27,4 +32,3 @@ export default function App() {
     />
   );
 }
-

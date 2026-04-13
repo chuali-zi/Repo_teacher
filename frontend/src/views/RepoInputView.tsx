@@ -26,12 +26,13 @@ export function RepoInputView({
       <div className="repo-form">
         <InputField
           disabled={submitting}
-          placeholder="C:\\repo\\demo 或 https://github.com/owner/repo"
+          placeholder="输入本地仓库路径或 GitHub 公共仓库 URL"
           value={inputValue}
           onChange={(next) => {
             onChange(next);
             void onValidate(next);
           }}
+          onBlur={() => void onValidate(inputValue)}
           onEnter={() => {
             if (canSubmit) {
               void onSubmit(inputValue);
@@ -46,4 +47,3 @@ export function RepoInputView({
     </main>
   );
 }
-

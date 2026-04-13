@@ -1,7 +1,6 @@
 import { ChatInput } from '../components/ChatInput';
 import { MessageList } from '../components/MessageList';
-import { SuggestionButtons } from '../components/SuggestionButtons';
-import type { ClientSessionStore, SuggestionDto } from '../types/contracts';
+import type { ClientSessionStore } from '../types/contracts';
 
 type ChatViewProps = {
   store: ClientSessionStore;
@@ -11,7 +10,7 @@ type ChatViewProps = {
 
 export function ChatView({ store, onSend, onClear }: ChatViewProps) {
   const disabled = store.status !== 'chatting' || store.subStatus !== 'waiting_user';
-  const suggestions = latestSuggestions(store.messages);
+  const placeholder = disabled ? 'Agent 正在思考...' : '输入你的问题，或点击上方建议...';
 
   return (
     <main className="view chat-view">
@@ -21,15 +20,19 @@ export function ChatView({ store, onSend, onClear }: ChatViewProps) {
           切换仓库
         </button>
       </div>
-      <MessageList messages={store.messages} />
-      <SuggestionButtons disabled={disabled} suggestions={suggestions} onPick={onSend} />
-      <ChatInput disabled={disabled} placeholder="继续问这个仓库" onSend={onSend} />
+      {store.degradationNotices.length > 0 ? (
+        <section className="notice-panel">
+          <h2>降级提示</h2>
+          <ul className="plain-list">
+            {store.degradationNotices.map((notice) => (
+              <li key={notice.degradation_id}>{notice.user_notice}</li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+      {store.activeError ? <p className="error-text">{store.activeError.message}</p> : null}
+      <MessageList disabled={disabled} messages={store.messages} onPickSuggestion={onSend} />
+      <ChatInput disabled={disabled} placeholder={placeholder} onSend={onSend} />
     </main>
   );
 }
-
-function latestSuggestions(messages: { suggestions: SuggestionDto[] }[]): SuggestionDto[] {
-  const last = [...messages].reverse().find((message) => message.suggestions.length > 0);
-  return last?.suggestions.slice(0, 3) ?? [];
-}
-

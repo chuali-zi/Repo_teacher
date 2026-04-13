@@ -61,6 +61,12 @@ def _analysis_reconnect_events(session_id: str) -> list:
 def _chat_reconnect_events(session_id: str) -> list:
     session = session_service.assert_session_matches(session_id)
     events = [session_service.build_status_snapshot_event(session)]
+    if (
+        session.status == SessionStatus.CHATTING
+        and session.conversation.sub_status != ConversationSubStatus.WAITING_USER
+    ):
+        return _dedupe_by_event_id(events)
+
     final_event = session_service.latest_chat_terminal_event(session_id)
     if final_event is not None:
         events.append(final_event)
