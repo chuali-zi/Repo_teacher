@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import PureWindowsPath
 from uuid import uuid4
@@ -8,20 +9,21 @@ from uuid import uuid4
 from backend.contracts.domain import (
     ConversationState,
     DegradationFlag,
-    EvidenceLine,
+    ExplainedItemRef,
     InitialReportContent,
     InitialReportAnswer,
     MessageRecord,
+    OutputContract,
     ProgressStepStateItem,
+    PromptBuildInput,
     ReadPolicySnapshot,
     RepositoryContext,
     RuntimeEvent,
     SessionContext,
     SessionStore,
-    Suggestion,
     StructuredAnswer,
-    StructuredMessageContent,
     TempResourceSet,
+    TopicRef,
     UserFacingError,
     UserFacingErrorException,
 )
@@ -44,13 +46,15 @@ from backend.contracts.enums import (
     ClientView,
     ConversationSubStatus,
     DegradationType,
+    DepthLevel,
     ErrorCode,
-    ConfidenceLevel,
     LearningGoal,
+    MessageSection,
     MessageRole,
     MessageType,
     ProgressStepKey,
     ProgressStepState,
+    PromptScenario,
     RepoSourceType,
     RuntimeEventType,
     SessionStatus,
@@ -66,6 +70,13 @@ from backend.m5_session.state_machine import (
     assert_transition_allowed,
     view_for_status,
 )
+from backend.m6_response.answer_generator import (
+    LlmStreamer,
+    parse_answer,
+    stream_answer_text,
+)
+from backend.m6_response.llm_caller import stream_llm_response
+from backend.m6_response.suggestion_generator import generate_next_step_suggestions
 from backend.security.safety import build_default_read_policy
 
 
@@ -91,9 +102,38 @@ def initial_progress_steps() -> list[ProgressStepStateItem]:
     ]
 
 
+_GOAL_KEYWORDS: tuple[tuple[LearningGoal, tuple[str, ...]], ...] = (
+    (LearningGoal.ENTRY, ("入口", "启动", "main", "app", "route", "路由")),
+    (LearningGoal.FLOW, ("流程", "调用链", "怎么走", "请求", "数据流", "flow")),
+    (LearningGoal.MODULE, ("模块", "文件", "类", "函数", "module")),
+    (LearningGoal.DEPENDENCY, ("依赖", "import", "包", "第三方")),
+    (LearningGoal.LAYER, ("分层", "架构", "层", "layer")),
+    (LearningGoal.STRUCTURE, ("结构", "目录", "先看哪里", "阅读顺序")),
+    (LearningGoal.SUMMARY, ("总结", "小结", "回顾")),
+)
+
+_TOPIC_ATTRS_BY_GOAL: dict[LearningGoal, tuple[str, ...]] = {
+    LearningGoal.OVERVIEW: (
+        "structure_refs",
+        "entry_refs",
+        "flow_refs",
+        "module_refs",
+        "reading_path_refs",
+    ),
+    LearningGoal.STRUCTURE: ("structure_refs", "reading_path_refs", "module_refs"),
+    LearningGoal.ENTRY: ("entry_refs", "reading_path_refs", "module_refs"),
+    LearningGoal.FLOW: ("flow_refs", "entry_refs", "module_refs"),
+    LearningGoal.MODULE: ("module_refs", "structure_refs", "reading_path_refs"),
+    LearningGoal.DEPENDENCY: ("dependency_refs", "module_refs", "structure_refs"),
+    LearningGoal.LAYER: ("layer_refs", "module_refs", "structure_refs"),
+    LearningGoal.SUMMARY: ("unknown_refs", "reading_path_refs", "structure_refs"),
+}
+
+
 class SessionService:
     def __init__(self) -> None:
         self.store = SessionStore(active_session=None)
+        self.llm_streamer: LlmStreamer = stream_llm_response
 
     def validate_repo_input(self, input_value: str) -> ValidateRepoData:
         return classify_repo_input(input_value)
@@ -198,6 +238,7 @@ class SessionService:
                 streaming_complete=True,
             )
         )
+        session.last_error = None
         session.conversation.sub_status = ConversationSubStatus.AGENT_THINKING
         session.updated_at = utc_now()
         return SendMessageData(
@@ -382,22 +423,97 @@ class SessionService:
             )
             return session.runtime_events[start_index:]
 
-    def run_chat_turn(self, session_id: str) -> list[RuntimeEvent]:
+    async def run_chat_turn(self, session_id: str) -> AsyncIterator[RuntimeEvent]:
         session = self.assert_session_matches(session_id)
-        start_index = len(session.runtime_events)
         if (
             session.status != SessionStatus.CHATTING
             or session.conversation.sub_status != ConversationSubStatus.AGENT_THINKING
         ):
-            return []
+            return
 
-        answer = self._build_followup_answer(session)
+        prompt_input = self._build_prompt_input(session)
+        answer_id = new_id("msg_agent")
+        status_start_index = len(session.runtime_events)
         self._transition_status(
             session,
             SessionStatus.CHATTING,
             ConversationSubStatus.AGENT_STREAMING,
         )
-        self._emit_answer_events(session, answer.answer_id, answer.message_type, answer.raw_text)
+        for event in session.runtime_events[status_start_index:]:
+            yield event
+
+        yield self._append_runtime_event(
+            session,
+            RuntimeEventType.ANSWER_STREAM_START,
+            message_id=answer_id,
+            payload={"message_type": self._message_type_for_prompt(prompt_input.scenario)},
+        )
+
+        raw_chunks: list[str] = []
+        visible_buffer = ""
+        json_output_started = False
+        json_marker = "<json_output>"
+        marker_tail_size = len(json_marker) - 1
+        try:
+            async for chunk in stream_answer_text(prompt_input, llm_streamer=self.llm_streamer):
+                raw_chunks.append(chunk)
+                if json_output_started:
+                    continue
+                visible_buffer += chunk
+                marker_index = visible_buffer.find(json_marker)
+                if marker_index >= 0:
+                    visible_chunk = visible_buffer[:marker_index]
+                    visible_buffer = ""
+                    json_output_started = True
+                elif len(visible_buffer) > marker_tail_size:
+                    visible_chunk = visible_buffer[:-marker_tail_size]
+                    visible_buffer = visible_buffer[-marker_tail_size:]
+                else:
+                    visible_chunk = ""
+                if visible_chunk:
+                    yield self._append_runtime_event(
+                        session,
+                        RuntimeEventType.ANSWER_STREAM_DELTA,
+                        message_id=answer_id,
+                        message_chunk=visible_chunk,
+                    )
+        except Exception as exc:
+            for event in self._fail_chat_turn(session, exc):
+                yield event
+            return
+
+        if visible_buffer and not json_output_started:
+            yield self._append_runtime_event(
+                session,
+                RuntimeEventType.ANSWER_STREAM_DELTA,
+                message_id=answer_id,
+                message_chunk=visible_buffer,
+            )
+
+        raw_text = "".join(raw_chunks).strip()
+        if not raw_text:
+            error = RuntimeError("LLM returned an empty response")
+            for event in self._fail_chat_turn(session, error):
+                yield event
+            return
+
+        yield self._append_runtime_event(
+            session,
+            RuntimeEventType.ANSWER_STREAM_END,
+            message_id=answer_id,
+        )
+
+        try:
+            parsed_answer = parse_answer(prompt_input, raw_text)
+            if not isinstance(parsed_answer, StructuredAnswer):
+                raise RuntimeError("M6 returned an initial-report answer for a chat turn")
+            answer = parsed_answer.model_copy(update={"answer_id": answer_id})
+            self._ensure_answer_suggestions(session, answer)
+        except Exception as exc:
+            for event in self._fail_chat_turn(session, exc):
+                yield event
+            return
+
         message = MessageRecord(
             message_id=answer.answer_id,
             role=MessageRole.AGENT,
@@ -411,13 +527,253 @@ class SessionService:
         )
         session.conversation.messages.append(message)
         session.conversation.last_suggestions = answer.suggestions
-        session.conversation.current_stage = TeachingStage.STRUCTURE_OVERVIEW
+        session.conversation.current_stage = self._stage_for_goal(
+            session.conversation.current_learning_goal,
+            answer.message_type,
+        )
+        session.last_error = None
+        self._record_explained_items(session, answer, message.message_id)
+        self._update_history_summary(session)
+        completion_start_index = len(session.runtime_events)
         self._transition_status(session, SessionStatus.CHATTING, ConversationSubStatus.WAITING_USER)
-        self._append_runtime_event(
+        for event in session.runtime_events[completion_start_index:]:
+            yield event
+        yield self._append_runtime_event(
             session,
             RuntimeEventType.MESSAGE_COMPLETED,
             message_id=message.message_id,
             payload={"message": message.model_dump(mode="python")},
+        )
+
+    def _build_prompt_input(self, session: SessionContext) -> PromptBuildInput:
+        last_user_message = self._last_user_message(session)
+        user_text = last_user_message.raw_text.strip()
+        previous_goal = session.conversation.current_learning_goal
+        previous_depth = session.conversation.depth_level
+        goal = self._infer_learning_goal(session, user_text)
+        depth = self._infer_depth_level(session.conversation.depth_level, user_text)
+        scenario = self._infer_prompt_scenario(user_text)
+        if scenario == PromptScenario.FOLLOW_UP:
+            if goal != previous_goal and self._looks_like_goal_switch(user_text):
+                scenario = PromptScenario.GOAL_SWITCH
+            elif depth != previous_depth and self._looks_like_depth_adjustment(user_text):
+                scenario = PromptScenario.DEPTH_ADJUSTMENT
+
+        session.conversation.current_learning_goal = goal
+        session.conversation.depth_level = depth
+
+        return PromptBuildInput(
+            scenario=scenario,
+            user_message=user_text,
+            teaching_skeleton=session.teaching_skeleton,
+            topic_slice=self._topic_slice_for_goal(session.teaching_skeleton, goal),
+            conversation_state=session.conversation.model_copy(deep=True),
+            history_summary=self._history_summary(session),
+            depth_level=depth,
+            output_contract=self._output_contract(depth),
+        )
+
+    def _last_user_message(self, session: SessionContext) -> MessageRecord:
+        return next(
+            item
+            for item in reversed(session.conversation.messages)
+            if item.role == MessageRole.USER
+        )
+
+    def _infer_prompt_scenario(self, user_text: str) -> PromptScenario:
+        normalized = user_text.casefold()
+        if any(token in normalized for token in ("总结", "小结", "回顾", "summary")):
+            return PromptScenario.STAGE_SUMMARY
+        return PromptScenario.FOLLOW_UP
+
+    def _looks_like_goal_switch(self, user_text: str) -> bool:
+        normalized = user_text.casefold()
+        return any(
+            token in normalized
+            for token in ("只看", "只讲", "聚焦", "切换", "先别", "focus", "only")
+        )
+
+    def _looks_like_depth_adjustment(self, user_text: str) -> bool:
+        normalized = user_text.casefold()
+        return any(
+            token in normalized
+            for token in ("深入", "详细", "展开", "讲深", "简单", "概括", "浅", "brief", "short", "deep")
+        )
+
+    def _infer_learning_goal(self, session: SessionContext, user_text: str) -> LearningGoal:
+        normalized = user_text.casefold()
+        for suggestion in reversed(session.conversation.last_suggestions):
+            if suggestion.target_goal and suggestion.text.strip().casefold() == normalized:
+                return suggestion.target_goal
+        for goal, keywords in _GOAL_KEYWORDS:
+            if any(keyword.casefold() in normalized for keyword in keywords):
+                return goal
+        return session.conversation.current_learning_goal
+
+    def _infer_depth_level(self, current_depth: DepthLevel, user_text: str) -> DepthLevel:
+        normalized = user_text.casefold()
+        if any(token in normalized for token in ("深入", "详细", "展开", "源码", "代码", "deep")):
+            return DepthLevel.DEEP
+        if any(token in normalized for token in ("简单", "概括", "浅", "brief", "short")):
+            return DepthLevel.SHALLOW
+        return current_depth
+
+    def _output_contract(self, depth: DepthLevel) -> OutputContract:
+        return OutputContract(
+            required_sections=[
+                MessageSection.FOCUS,
+                MessageSection.DIRECT_EXPLANATION,
+                MessageSection.RELATION_TO_OVERALL,
+                MessageSection.EVIDENCE,
+                MessageSection.UNCERTAINTY,
+                MessageSection.NEXT_STEPS,
+            ],
+            max_core_points=3 if depth == DepthLevel.SHALLOW else 5,
+            must_include_next_steps=True,
+            must_mark_uncertainty=True,
+            must_use_candidate_wording=True,
+        )
+
+    def _topic_slice_for_goal(self, skeleton, goal: LearningGoal) -> list[TopicRef]:
+        topic_index = skeleton.topic_index
+        refs: list[TopicRef] = []
+        for attr in _TOPIC_ATTRS_BY_GOAL.get(goal, ("structure_refs",)):
+            refs.extend(getattr(topic_index, attr))
+        if not refs:
+            refs = self._all_topic_refs(skeleton)
+        return self._dedupe_topic_refs(refs)[:20]
+
+    def _all_topic_refs(self, skeleton) -> list[TopicRef]:
+        topic_index = skeleton.topic_index
+        refs: list[TopicRef] = []
+        for attr in (
+            "structure_refs",
+            "entry_refs",
+            "flow_refs",
+            "layer_refs",
+            "dependency_refs",
+            "module_refs",
+            "reading_path_refs",
+            "unknown_refs",
+        ):
+            refs.extend(getattr(topic_index, attr))
+        return self._dedupe_topic_refs(refs)
+
+    def _dedupe_topic_refs(self, refs: list[TopicRef]) -> list[TopicRef]:
+        deduped: list[TopicRef] = []
+        seen: set[str] = set()
+        for ref in refs:
+            if ref.ref_id in seen:
+                continue
+            deduped.append(ref)
+            seen.add(ref.ref_id)
+        return deduped
+
+    def _history_summary(self, session: SessionContext) -> str | None:
+        if session.conversation.history_summary:
+            return session.conversation.history_summary
+        return self._summarize_recent_messages(session.conversation.messages[:-1])
+
+    def _update_history_summary(self, session: SessionContext) -> None:
+        session.conversation.history_summary = self._summarize_recent_messages(
+            session.conversation.messages
+        )
+
+    def _summarize_recent_messages(self, messages: list[MessageRecord]) -> str | None:
+        if not messages:
+            return None
+        lines: list[str] = []
+        for message in messages[-10:]:
+            if message.role == MessageRole.USER:
+                role = "用户"
+            elif message.role == MessageRole.AGENT:
+                role = "助手"
+            else:
+                role = "系统"
+            text = " ".join(message.raw_text.split())
+            if len(text) > 180:
+                text = f"{text[:177]}..."
+            lines.append(f"{role}: {text}")
+        summary = "\n".join(lines)
+        return summary[-2000:] if summary else None
+
+    def _ensure_answer_suggestions(
+        self,
+        session: SessionContext,
+        answer: StructuredAnswer,
+    ) -> None:
+        if answer.suggestions:
+            answer.suggestions = answer.suggestions[:3]
+            answer.structured_content.next_steps = answer.suggestions
+            return
+        suggestions = generate_next_step_suggestions(
+            session.conversation,
+            self._all_topic_refs(session.teaching_skeleton),
+        )
+        answer.suggestions = suggestions
+        answer.structured_content.next_steps = suggestions
+
+    def _record_explained_items(
+        self,
+        session: SessionContext,
+        answer: StructuredAnswer,
+        message_id: str,
+    ) -> None:
+        seen = {
+            (item.item_type, item.item_id)
+            for item in session.conversation.explained_items
+        }
+        for ref in answer.related_topic_refs[:6]:
+            key = (ref.ref_type, ref.target_id)
+            if key in seen:
+                continue
+            session.conversation.explained_items.append(
+                ExplainedItemRef(
+                    item_type=ref.ref_type,
+                    item_id=ref.target_id,
+                    topic=ref.topic,
+                    explained_at_message_id=message_id,
+                )
+            )
+            seen.add(key)
+
+    def _stage_for_goal(
+        self,
+        goal: LearningGoal,
+        message_type: MessageType,
+    ) -> TeachingStage:
+        if message_type == MessageType.STAGE_SUMMARY or goal == LearningGoal.SUMMARY:
+            return TeachingStage.SUMMARY
+        return {
+            LearningGoal.OVERVIEW: TeachingStage.STRUCTURE_OVERVIEW,
+            LearningGoal.STRUCTURE: TeachingStage.STRUCTURE_OVERVIEW,
+            LearningGoal.ENTRY: TeachingStage.ENTRY_EXPLAINED,
+            LearningGoal.FLOW: TeachingStage.FLOW_EXPLAINED,
+            LearningGoal.LAYER: TeachingStage.LAYER_EXPLAINED,
+            LearningGoal.DEPENDENCY: TeachingStage.DEPENDENCY_EXPLAINED,
+            LearningGoal.MODULE: TeachingStage.MODULE_DEEP_DIVE,
+        }.get(goal, TeachingStage.STRUCTURE_OVERVIEW)
+
+    def _message_type_for_prompt(self, scenario: PromptScenario) -> MessageType:
+        if scenario == PromptScenario.GOAL_SWITCH:
+            return MessageType.GOAL_SWITCH_CONFIRMATION
+        if scenario == PromptScenario.STAGE_SUMMARY:
+            return MessageType.STAGE_SUMMARY
+        return MessageType.AGENT_ANSWER
+
+    def _fail_chat_turn(self, session: SessionContext, exc: Exception) -> list[RuntimeEvent]:
+        start_index = len(session.runtime_events)
+        error = self.llm_failed_error(exc)
+        session.last_error = error
+        self._transition_status(
+            session,
+            SessionStatus.CHATTING,
+            ConversationSubStatus.WAITING_USER,
+        )
+        self._append_runtime_event(
+            session,
+            RuntimeEventType.ERROR,
+            error=error,
         )
         return session.runtime_events[start_index:]
 
@@ -485,6 +841,21 @@ class SessionService:
             message="分析过程出错，请重试或尝试其他仓库",
             retryable=True,
             stage=stage,
+            input_preserved=True,
+            internal_detail=str(exc),
+        )
+
+    def llm_failed_error(self, exc: Exception) -> UserFacingError:
+        is_timeout = isinstance(exc, TimeoutError)
+        return UserFacingError(
+            error_code=ErrorCode.LLM_API_TIMEOUT if is_timeout else ErrorCode.LLM_API_FAILED,
+            message=(
+                "LLM 调用超时，请稍后重试或缩小问题范围。"
+                if is_timeout
+                else "LLM 调用失败，请检查 llm_config.json 或稍后重试。"
+            ),
+            retryable=True,
+            stage=SessionStatus.CHATTING,
             input_preserved=True,
             internal_detail=str(exc),
         )
@@ -745,44 +1116,6 @@ class SessionService:
             RuntimeEventType.MESSAGE_COMPLETED,
             message_id=message.message_id,
             payload={"message": message.model_dump(mode="python")},
-        )
-
-    def _build_followup_answer(self, session: SessionContext) -> StructuredAnswer:
-        last_user_message = next(
-            item
-            for item in reversed(session.conversation.messages)
-            if item.role == MessageRole.USER
-        )
-        suggestions = [
-            Suggestion(
-                suggestion_id=new_id("sug"),
-                text="继续展开这个模块与入口的关系。",
-                target_goal=LearningGoal.MODULE,
-            )
-        ]
-        raw_text = (
-            f"你刚才问的是：{last_user_message.raw_text.strip()}。"
-            f"基于当前会话，我建议先围绕 {session.repository.display_name} 的结构线索继续定位相关模块。"
-        )
-        return StructuredAnswer(
-            answer_id=new_id("msg_agent"),
-            message_type=MessageType.AGENT_ANSWER,
-            raw_text=raw_text,
-            structured_content=StructuredMessageContent(
-                focus="围绕当前提问给出保守解释。",
-                direct_explanation=raw_text,
-                relation_to_overall="回答基于当前已缓存的仓库概览与结构线索。",
-                evidence_lines=[
-                    EvidenceLine(
-                        text="当前回答来自会话内已缓存的仓库结构、静态分析和教学骨架。",
-                        evidence_refs=[],
-                        confidence=ConfidenceLevel.UNKNOWN,
-                    )
-                ],
-                uncertainties=["更细粒度事实仍依赖后续 M2-M4/M6 实现补齐。"],
-                next_steps=suggestions,
-            ),
-            suggestions=suggestions,
         )
 
     def _cleanup_temp_resources(self, temp_resources: TempResourceSet) -> None:

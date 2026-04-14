@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime
 from pathlib import Path
+
+import pytest
 
 from backend.contracts.domain import RuntimeEvent
 from backend.contracts.enums import (
     ConversationSubStatus,
+    ErrorCode,
     MessageRole,
     MessageType,
     RuntimeEventType,
@@ -15,6 +19,70 @@ from backend.contracts.enums import (
 from backend.m5_session import session_service
 from backend.m5_session.event_mapper import runtime_event_to_sse
 from backend.m5_session.event_streams import iter_analysis_events, iter_chat_events
+
+
+@pytest.fixture(autouse=True)
+def fake_llm_streamer():
+    captured: list[list[dict[str, str]]] = []
+    previous_streamer = session_service.llm_streamer
+
+    async def stream(messages: list[dict[str, str]]):
+        captured.append(messages)
+        label = _prompt_label(_message_text(messages))
+        payload = {
+            "focus": f"LLM focus: {label}",
+            "direct_explanation": f"LLM direct answer for {label}.",
+            "relation_to_overall": "This answer is generated from the M6 prompt context.",
+            "evidence_lines": [
+                {
+                    "text": "M6 received the controlled teaching skeleton and topic slice.",
+                    "evidence_refs": [],
+                    "confidence": "medium",
+                }
+            ],
+            "uncertainties": ["当前没有额外不确定项。"],
+            "next_steps": [
+                {
+                    "suggestion_id": "s_next",
+                    "text": "继续看入口候选。",
+                    "target_goal": "entry",
+                    "related_topic_refs": [],
+                }
+            ],
+            "related_topic_refs": [],
+            "used_evidence_refs": [],
+        }
+        text = (
+            f"## 本轮重点\nLLM answer for {label}."
+            f"\n<json_output>{json.dumps(payload)}</json_output>"
+        )
+        midpoint = len(text) // 2
+        yield text[:midpoint]
+        yield text[midpoint:]
+
+    session_service.llm_streamer = stream
+    yield captured
+    session_service.llm_streamer = previous_streamer
+    session_service.clear_active_session()
+
+
+def _message_text(messages: list[dict[str, str]]) -> str:
+    return " ".join(message.get("content", "") for message in messages)
+
+
+def _prompt_label(prompt: str) -> str:
+    for candidate in (
+        "second question",
+        "first question",
+        "question for reconnect",
+        "这个仓库先看哪里？",
+        "q3",
+        "q2",
+        "q1",
+    ):
+        if candidate in prompt:
+            return candidate
+    return "follow-up question"
 
 
 def test_analysis_stream_completes_initial_report_for_local_repo(tmp_path: Path) -> None:
@@ -65,7 +133,7 @@ def test_analysis_pipeline_uses_m2_m3_m4_outputs(tmp_path: Path) -> None:
     session_service.clear_active_session()
 
 
-def test_chat_stream_completes_followup_answer(tmp_path: Path) -> None:
+def test_chat_stream_completes_followup_answer(tmp_path: Path, fake_llm_streamer) -> None:
     (tmp_path / "README.md").write_text("# demo\n", encoding="utf-8")
     (tmp_path / "app.py").write_text("print('hi')\n", encoding="utf-8")
 
@@ -85,6 +153,14 @@ def test_chat_stream_completes_followup_answer(tmp_path: Path) -> None:
     assert snapshot.sub_status == ConversationSubStatus.WAITING_USER
     assert snapshot.messages[-2].role == MessageRole.USER
     assert snapshot.messages[-1].message_type == MessageType.AGENT_ANSWER
+    assert fake_llm_streamer
+    assert fake_llm_streamer[-1][0]["role"] == "system"
+    assert "topic_slice" in _message_text(fake_llm_streamer[-1])
+    assert fake_llm_streamer[-1][-1]["role"] == "user"
+    assert snapshot.messages[-1].raw_text.startswith("## 本轮重点")
+    direct_explanation = snapshot.messages[-1].structured_content.direct_explanation
+    assert direct_explanation.startswith("LLM direct answer")
+    assert "后续 M2-M4/M6 实现补齐" not in snapshot.messages[-1].raw_text
 
     session_service.clear_active_session()
 
@@ -112,6 +188,89 @@ def test_chat_stream_completes_consecutive_followup_answers(tmp_path: Path) -> N
         message for message in snapshot.messages if message.message_type == MessageType.AGENT_ANSWER
     ]
     assert len(agent_answers) == 3
+
+    session_service.clear_active_session()
+
+
+def test_chat_stream_reports_llm_failure_without_fallback_answer(tmp_path: Path) -> None:
+    async def failing_streamer(messages: list[dict[str, str]]):
+        raise RuntimeError("provider unavailable")
+        yield ""
+
+    session_service.llm_streamer = failing_streamer
+    (tmp_path / "README.md").write_text("# demo\n", encoding="utf-8")
+    (tmp_path / "app.py").write_text("print('hi')\n", encoding="utf-8")
+
+    session_service.create_repo_session(str(tmp_path))
+    session_id = session_service.store.active_session.session_id
+    asyncio.run(_collect(iter_analysis_events(session_id)))
+
+    session_service.accept_chat_message(session_id, "first question")
+    events = asyncio.run(_collect(iter_chat_events(session_id)))
+
+    assert events[-1].event_type == RuntimeEventType.ERROR
+    assert events[-1].error.error_code == ErrorCode.LLM_API_FAILED
+
+    snapshot = session_service.get_snapshot(session_id)
+    assert snapshot.sub_status == ConversationSubStatus.WAITING_USER
+    assert snapshot.active_error.error_code == ErrorCode.LLM_API_FAILED
+    assert snapshot.messages[-1].role == MessageRole.USER
+
+    session_service.clear_active_session()
+
+
+def test_pending_chat_turn_does_not_replay_previous_completion(tmp_path: Path) -> None:
+    (tmp_path / "README.md").write_text("# demo\n", encoding="utf-8")
+    (tmp_path / "app.py").write_text("print('hi')\n", encoding="utf-8")
+
+    session_service.create_repo_session(str(tmp_path))
+    session_id = session_service.store.active_session.session_id
+    asyncio.run(_collect(iter_analysis_events(session_id)))
+
+    session_service.accept_chat_message(session_id, "first question")
+    first_events = asyncio.run(_collect(iter_chat_events(session_id)))
+    first_answer_id = first_events[-1].message.message_id
+
+    session_service.accept_chat_message(session_id, "second question")
+    second_events = asyncio.run(_collect(iter_chat_events(session_id)))
+    first_non_status = next(
+        event
+        for event in second_events
+        if event.event_type != RuntimeEventType.STATUS_CHANGED
+    )
+
+    assert first_non_status.event_type == RuntimeEventType.ANSWER_STREAM_START
+    assert second_events[-1].event_type == RuntimeEventType.MESSAGE_COMPLETED
+    assert second_events[-1].message.message_id != first_answer_id
+    assert "second question" in second_events[-1].message.raw_text
+
+    snapshot = session_service.get_snapshot(session_id)
+    assert snapshot.sub_status == ConversationSubStatus.WAITING_USER
+
+    session_service.clear_active_session()
+
+
+def test_completed_chat_turn_reconnect_replays_latest_completion(tmp_path: Path) -> None:
+    (tmp_path / "README.md").write_text("# demo\n", encoding="utf-8")
+    (tmp_path / "app.py").write_text("print('hi')\n", encoding="utf-8")
+
+    session_service.create_repo_session(str(tmp_path))
+    session_id = session_service.store.active_session.session_id
+    asyncio.run(_collect(iter_analysis_events(session_id)))
+
+    session_service.accept_chat_message(session_id, "question for reconnect")
+    events = asyncio.run(_collect(iter_chat_events(session_id)))
+    completed_message = events[-1].message
+    message_count = len(session_service.get_snapshot(session_id).messages)
+
+    reconnect_events = asyncio.run(_collect(iter_chat_events(session_id)))
+
+    assert [event.event_type for event in reconnect_events] == [
+        RuntimeEventType.STATUS_CHANGED,
+        RuntimeEventType.MESSAGE_COMPLETED,
+    ]
+    assert reconnect_events[-1].message.message_id == completed_message.message_id
+    assert len(session_service.get_snapshot(session_id).messages) == message_count
 
     session_service.clear_active_session()
 

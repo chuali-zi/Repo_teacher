@@ -31,8 +31,11 @@ async def iter_chat_events(session_id: str) -> AsyncIterator[ChatSseEvent]:
         if event.event_type in {RuntimeEventType.MESSAGE_COMPLETED, RuntimeEventType.ERROR}:
             return
 
-    if session.status == SessionStatus.CHATTING and session.conversation.sub_status == ConversationSubStatus.AGENT_THINKING:
-        for event in session_service.run_chat_turn(session_id):
+    if (
+        session.status == SessionStatus.CHATTING
+        and session.conversation.sub_status == ConversationSubStatus.AGENT_THINKING
+    ):
+        async for event in session_service.run_chat_turn(session_id):
             yield runtime_event_to_sse(event)
             if event.event_type in {RuntimeEventType.MESSAGE_COMPLETED, RuntimeEventType.ERROR}:
                 return
@@ -42,7 +45,10 @@ def _analysis_reconnect_events(session_id: str) -> list:
     session = session_service.assert_session_matches(session_id)
     events = [session_service.build_status_snapshot_event(session)]
 
-    latest_progress = session_service.latest_runtime_event(session_id, RuntimeEventType.ANALYSIS_PROGRESS)
+    latest_progress = session_service.latest_runtime_event(
+        session_id,
+        RuntimeEventType.ANALYSIS_PROGRESS,
+    )
     if latest_progress is not None:
         events.append(latest_progress)
 

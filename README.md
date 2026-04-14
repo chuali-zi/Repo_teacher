@@ -38,7 +38,7 @@ The backend is no longer only a scaffold. The current implementation includes:
 - M3 deterministic Python-first static analysis for entry candidates, imports, modules, layers, flows, reading path, evidence, warnings, and degradation.
 - M4 teaching skeleton assembly in the initial-report field order required by the interface spec.
 - M5 single active session orchestration, progress snapshots, SSE event mapping, chat turn lifecycle, and temp clone cleanup.
-- M6 prompt building, DeepSeek/OpenAI-compatible streaming helper, structured response parsing, and suggestion generation utilities.
+- M6 prompt building, DeepSeek/OpenAI-compatible calling, structured response parsing, and suggestion generation utilities.
 
 Important runtime constraints:
 
@@ -46,7 +46,8 @@ Important runtime constraints:
 - M1-M4 are deterministic and do not call an LLM.
 - Sensitive files may be reported as present, but their body is not read into analysis, SSE, DTOs, logs, or prompts.
 - The app keeps only one in-memory active session and does not use a database.
-- Multi-turn chat currently uses a deterministic structured fallback in M5. M6 has prompt/parser/LLM utilities, but full live LLM orchestration is still a follow-up integration step.
+- Multi-turn chat now routes through M5 -> M6: M5 builds a controlled `PromptBuildInput`, M6 builds the prompt, calls the configured LLM, parses the final structured answer, and M5 records the resulting message.
+- If the LLM call or response parsing fails, chat emits `llm_api_failed` or `llm_api_timeout` instead of silently returning the old deterministic fallback answer.
 
 ## Frontend Status
 
@@ -95,6 +96,9 @@ scripts\dev_backend.cmd
 
 GitHub repository input requires `git` on PATH. Live M6 LLM calls now read from
 the visible root config file `llm_config.json` instead of environment variables.
+The `openai` package is preferred when installed; if it is unavailable, the
+backend falls back to a standard-library HTTP call against the same
+OpenAI-compatible `/chat/completions` endpoint.
 
 Example:
 
@@ -145,7 +149,7 @@ pytest -q --basetemp pytest_tmp -p no:cacheprovider
 Current backend verification after this audit:
 
 ```text
-44 passed, 1 skipped
+51 passed, 1 skipped
 ```
 
 `python -m compileall -q backend` also passes. `ruff` is listed in the dev
@@ -193,6 +197,7 @@ This backend audit found and corrected several integration risks:
 - Stale SSE session errors now keep the requested `session_id` in the error event, so clients can discard or close the correct stream.
 - M3 now backfills referenced evidence IDs into `evidence_catalog` when deterministic modules emit evidence references without full evidence objects.
 - Module package docstrings were updated to describe current implementation status instead of stale TODO-only scaffold text.
+- M5 multi-turn chat previously never called M6/LLM and returned a hard-coded conservative answer. It now calls M6, streams LLM text, parses the structured result, updates conversation state, and surfaces explicit LLM errors when generation fails.
 
 ## Implementation Rules
 

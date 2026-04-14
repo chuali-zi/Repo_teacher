@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import urllib.error
+import urllib.request
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,13 +23,18 @@ class LlmConfig:
     timeout_seconds: float
 
 
-async def stream_llm_response(prompt: str) -> AsyncIterator[str]:
+async def stream_llm_response(
+    messages: list[dict[str, str]],
+    *,
+    temperature: float = 0.6,
+) -> AsyncIterator[str]:
+    config = load_llm_config()
     try:
         from openai import APITimeoutError, AsyncOpenAI
-    except ModuleNotFoundError as exc:
-        raise RuntimeError("缺少 openai 依赖，请先安装后端依赖") from exc
+    except ModuleNotFoundError:
+        yield await asyncio.to_thread(_complete_with_stdlib_http, config, messages, temperature)
+        return
 
-    config = load_llm_config()
     client = AsyncOpenAI(
         api_key=config.api_key,
         base_url=config.base_url,
@@ -37,8 +45,8 @@ async def stream_llm_response(prompt: str) -> AsyncIterator[str]:
         try:
             stream = await client.chat.completions.create(
                 model=config.model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.2,
+                messages=messages,
+                temperature=temperature,
                 stream=True,
                 timeout=config.timeout_seconds,
             )
@@ -60,6 +68,48 @@ async def stream_llm_response(prompt: str) -> AsyncIterator[str]:
 
     if last_error is not None:
         raise last_error
+
+
+def _complete_with_stdlib_http(
+    config: LlmConfig,
+    messages: list[dict[str, str]],
+    temperature: float,
+) -> str:
+    endpoint = f"{config.base_url.rstrip('/')}/chat/completions"
+    body = json.dumps(
+        {
+            "model": config.model,
+            "messages": messages,
+            "temperature": temperature,
+            "stream": False,
+        }
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        endpoint,
+        data=body,
+        headers={
+            "Authorization": f"Bearer {config.api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=config.timeout_seconds) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except TimeoutError as exc:
+        raise TimeoutError("LLM API 调用超时") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"LLM API 调用失败: {exc.reason}") from exc
+    except OSError as exc:
+        raise RuntimeError(f"LLM API 调用失败: {exc}") from exc
+    try:
+        content = payload["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise RuntimeError("LLM API 响应缺少 message.content") from exc
+    text = str(content).strip()
+    if not text:
+        raise RuntimeError("LLM API 返回了空内容")
+    return text
 
 
 def load_llm_config(config_path: Path = CONFIG_PATH) -> LlmConfig:

@@ -7,41 +7,71 @@ from typing import Any
 from backend.contracts.domain import PromptBuildInput
 from backend.contracts.enums import PromptScenario
 
-_WINDOWS_PATH_RE = re.compile(r"(?<![A-Za-z0-9_./-])(?:[A-Za-z]:\\[^\s\"']+)")
-_UNIX_PATH_RE = re.compile(r"(?<![A-Za-z0-9_.-])/(?:[^\s\"']+)")
 _SECRET_RE = re.compile(
     r"(?:sk-[A-Za-z0-9]{16,}|gh[pousr]_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z\-_]{20,})"
 )
 
 _SYSTEM_RULES = """
-你是 Repo Tutor 的教学回答 Agent。
+你是 Repo Tutor，一位面向编程初学者的源码仓库教学老师。
 
-必须严格遵守：
-1. 只能基于提供的教学骨架、主题切片、会话状态回答，不得发明新结论。
-2. 对入口、流程、分层、依赖等不确定结论，使用“候选 / 可能 / 目前证据更支持”之类措辞。
-3. 不得输出敏感文件正文、绝对真实路径、内部错误堆栈、疑似密钥。
-4. 每轮只讲 2-4 个核心点；浅层时更少，深层时可补更多证据，但仍要标注不确定项。
-5. 如果证据不足，要明确说明“不确定”或“暂时无法确认”，不要强行补全。
-6. 最终必须输出给用户看的 Markdown 正文，然后单独输出一个 <json_output>...</json_output> 结构化 JSON。
+你的教学风格：
+- 用自然、耐心的语言带着学生理解陌生仓库，不要像在填表。
+- 主动带路：每轮结束时告诉学生下一步该看什么、为什么。
+- 先讲观察框架，再映射到当前仓库，最后再进入局部实现细节。
+- 每轮围绕 2-5 个核心认知点展开；浅层回答少讲术语，深层回答补证据和实现线索。
+
+你的知识来源：
+- 优先基于提供的教学骨架、主题切片、会话状态和历史摘要回答。
+- 当骨架没有直接覆盖用户问题时，可以基于编程常识和当前仓库上下文合理补充，但必须标注“根据推断”或“可能”。
+- 对入口、流程、分层、依赖等不确定结论，使用“候选”“可能”“目前证据更支持”等措辞。
+- 证据不足时明确说“目前不确定”，不要硬编运行时调用链、真实数据流或不存在的模块职责。
+
+安全规则：
+- 不得输出疑似密钥、token、凭据等敏感信息。
+- 不得输出内部错误堆栈。
+
+输出格式：
+- 先输出给用户看的 Markdown 正文，保持教学语言自然可读。
+- 正文结束后，另起一行输出 <json_output>...</json_output> 包裹的结构化 JSON，用于系统解析。
 """.strip()
 
 
-def build_prompt(input_data: PromptBuildInput) -> str:
-    payload = _build_payload(input_data)
-    json_schema = _json_schema_for_scenario(input_data.scenario)
-    sections = [
+def build_messages(input_data: PromptBuildInput) -> list[dict[str, str]]:
+    messages: list[dict[str, str]] = []
+    system_parts = [
         _SYSTEM_RULES,
-        f"场景: {input_data.scenario}",
+        f"当前场景: {input_data.scenario}",
         f"讲解深度: {input_data.depth_level}",
         _scenario_guidance(input_data.scenario),
-        "输出要求:",
         _output_requirements(input_data),
-        "JSON 结构要求:",
-        json_schema,
-        "可用上下文(JSON):",
-        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+        "JSON 结构要求:\n" + _json_schema_for_scenario(input_data.scenario),
+        "以下是当前仓库的教学参考素材（教学骨架、主题切片、会话状态和历史摘要），请基于这些素材回答：",
+        json.dumps(_build_payload(input_data), ensure_ascii=False, indent=2, sort_keys=True),
     ]
-    return "\n\n".join(section for section in sections if section)
+    messages.append({"role": "system", "content": "\n\n".join(part for part in system_parts if part)})
+
+    for msg in input_data.conversation_state.messages[-8:]:
+        if msg.role == "user":
+            messages.append({"role": "user", "content": _sanitize_value(msg.raw_text)})
+        elif msg.role == "agent":
+            visible = _strip_json_output(msg.raw_text)
+            if len(visible) > 1500:
+                visible = visible[:1500] + "\n...(已截断)"
+            messages.append({"role": "assistant", "content": _sanitize_value(visible)})
+
+    current_user_text = _sanitize_value(input_data.user_message or "")
+    if current_user_text and (
+        not messages
+        or messages[-1].get("role") != "user"
+        or messages[-1].get("content") != current_user_text
+    ):
+        messages.append({"role": "user", "content": current_user_text})
+
+    return messages
+
+
+def _strip_json_output(text: str) -> str:
+    return re.sub(r"<json_output>.*?</json_output>", "", text, flags=re.DOTALL).strip()
 
 
 def _build_payload(input_data: PromptBuildInput) -> dict[str, Any]:
@@ -59,17 +89,7 @@ def _build_payload(input_data: PromptBuildInput) -> dict[str, Any]:
 
 def _sanitize_conversation(input_data: PromptBuildInput) -> dict[str, Any]:
     conversation = input_data.conversation_state.model_dump(mode="json")
-    conversation["messages"] = [
-        {
-            "message_id": item.message_id,
-            "role": item.role,
-            "message_type": item.message_type,
-            "raw_text": _sanitize_value(item.raw_text),
-            "related_goal": item.related_goal,
-            "streaming_complete": item.streaming_complete,
-        }
-        for item in input_data.conversation_state.messages[-6:]
-    ]
+    conversation.pop("messages", None)
     return _sanitize_value(conversation)
 
 
@@ -84,9 +104,7 @@ def _sanitize_value(value: Any) -> Any:
     if isinstance(value, list):
         return [_sanitize_value(item) for item in value]
     if isinstance(value, str):
-        redacted = _WINDOWS_PATH_RE.sub("<path_omitted>", value)
-        redacted = _UNIX_PATH_RE.sub("<path_omitted>", redacted)
-        return _SECRET_RE.sub("[redacted_secret]", redacted)
+        return _SECRET_RE.sub("[redacted_secret]", value)
     return value
 
 
@@ -127,13 +145,10 @@ def _scenario_guidance(scenario: PromptScenario) -> str:
 def _output_requirements(input_data: PromptBuildInput) -> str:
     required_sections = ", ".join(input_data.output_contract.required_sections)
     return (
-        f"- 先输出用户可读 Markdown，再输出 <json_output>JSON</json_output>。\n"
-        f"- required_sections 顺序: {required_sections}\n"
-        f"- max_core_points: {input_data.output_contract.max_core_points}\n"
-        f"- must_include_next_steps: {str(input_data.output_contract.must_include_next_steps).lower()}\n"
-        f"- must_mark_uncertainty: {str(input_data.output_contract.must_mark_uncertainty).lower()}\n"
-        f"- must_use_candidate_wording: {str(input_data.output_contract.must_use_candidate_wording).lower()}\n"
-        f"- next_steps / suggested_next_questions 必须 1-3 条，短句、可点击、自然。"
+        f"回答建议包含以下部分（自然衔接，不需要机械使用这些标题）：{required_sections}\n"
+        f"核心认知点控制在 {input_data.output_contract.max_core_points} 个以内。\n"
+        "每轮结尾给出 1-3 条下一步建议，语气像在带学生继续读仓库。\n"
+        "不确定的结论必须标注；静态证据不足时不要伪造确定流程。"
     )
 
 

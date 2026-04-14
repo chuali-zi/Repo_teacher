@@ -16,6 +16,7 @@ from backend.contracts.domain import (
     KeyDirectoryItem,
     LanguageTypeSection,
     LayerSection,
+    MessageRecord,
     OutputContract,
     OverviewSection,
     ProgressStepStateItem,
@@ -33,6 +34,8 @@ from backend.contracts.enums import (
     LearningGoal,
     MainPathRole,
     MessageSection,
+    MessageRole,
+    MessageType,
     PromptScenario,
     ProgressStepKey,
     ProgressStepState,
@@ -41,13 +44,13 @@ from backend.contracts.enums import (
     TopicRefType,
 )
 from backend.m6_response.llm_caller import load_llm_config
-from backend.m6_response.prompt_builder import build_prompt
+from backend.m6_response.prompt_builder import build_messages
 from backend.m6_response.response_parser import parse_final_answer
 from backend.m6_response.suggestion_generator import generate_next_step_suggestions
 
 
-def test_build_prompt_for_follow_up_includes_sanitized_context() -> None:
-    prompt = build_prompt(
+def test_build_messages_for_follow_up_includes_context_and_history() -> None:
+    messages = build_messages(
         PromptBuildInput(
             scenario=PromptScenario.FOLLOW_UP,
             user_message="启动流程怎么走？",
@@ -58,6 +61,35 @@ def test_build_prompt_for_follow_up_includes_sanitized_context() -> None:
                 current_learning_goal=LearningGoal.FLOW,
                 current_stage=TeachingStage.INITIAL_REPORT,
                 sub_status=ConversationSubStatus.AGENT_THINKING,
+                messages=[
+                    MessageRecord(
+                        message_id="msg_user_1",
+                        role=MessageRole.USER,
+                        message_type=MessageType.USER_QUESTION,
+                        created_at=datetime.now(UTC),
+                        raw_text="先看 backend/main.py",
+                        streaming_complete=True,
+                    ),
+                    MessageRecord(
+                        message_id="msg_agent_1",
+                        role=MessageRole.AGENT,
+                        message_type=MessageType.AGENT_ANSWER,
+                        created_at=datetime.now(UTC),
+                        raw_text=(
+                            "可以先看 backend/main.py。"
+                            "\n<json_output>{\"focus\":\"entry\"}</json_output>"
+                        ),
+                        structured_content={
+                            "focus": "入口",
+                            "direct_explanation": "先看入口。",
+                            "relation_to_overall": "入口帮助建立整体认知。",
+                            "evidence_lines": [],
+                            "uncertainties": [],
+                            "next_steps": [],
+                        },
+                        streaming_complete=True,
+                    ),
+                ],
             ),
             history_summary="用户刚看完首轮报告，想继续看启动流程。",
             depth_level=DepthLevel.DEFAULT,
@@ -65,11 +97,18 @@ def test_build_prompt_for_follow_up_includes_sanitized_context() -> None:
         )
     )
 
-    assert "场景: follow_up" in prompt
-    assert "启动流程怎么走？" in prompt
-    assert "<json_output>" in prompt
-    assert "[redacted_path]" not in prompt
-    assert '"topic_slice"' in prompt
+    assert isinstance(messages, list)
+    assert len(messages) >= 4
+    assert messages[0]["role"] == "system"
+    assert "Repo Tutor" in messages[0]["content"]
+    assert "topic_slice" in messages[0]["content"]
+    assert "backend/main.py" in messages[0]["content"]
+    assert "<path_omitted>" not in messages[0]["content"]
+    assert messages[-1]["role"] == "user"
+    assert "启动流程怎么走？" in messages[-1]["content"]
+    assistant_history = [item for item in messages if item["role"] == "assistant"]
+    assert assistant_history
+    assert "<json_output>" not in assistant_history[-1]["content"]
 
 
 def test_parse_final_answer_reads_structured_follow_up_payload() -> None:
