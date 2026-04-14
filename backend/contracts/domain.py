@@ -39,7 +39,11 @@ from backend.contracts.enums import (
     ScanScopeType,
     SessionStatus,
     SkeletonMode,
+    StudentCoverageLevel,
+    TeachingDebugEventType,
+    TeachingDecisionAction,
     TeachingStage,
+    TeachingPlanStepStatus,
     TopicRefType,
     UnknownTopic,
     WarningType,
@@ -514,6 +518,85 @@ class MessageRecord(ContractModel):
         return self
 
 
+class TeachingPlanStep(ContractModel):
+    step_id: str
+    title: str
+    goal: LearningGoal
+    target_scope: str
+    reason: str
+    expected_learning_gain: str
+    status: TeachingPlanStepStatus
+    priority: int
+    depends_on: list[str] = Field(default_factory=list)
+    source_topic_refs: list[TopicRef] = Field(default_factory=list)
+    adaptation_note: str | None = None
+
+
+class TeachingPlanState(ContractModel):
+    plan_id: str
+    generated_from_skeleton_id: str
+    current_step_id: str | None = None
+    steps: list[TeachingPlanStep] = Field(default_factory=list)
+    update_notes: list[str] = Field(default_factory=list)
+    updated_at: datetime
+
+
+class StudentLearningTopicState(ContractModel):
+    topic: LearningGoal
+    coverage_level: StudentCoverageLevel
+    confidence_of_estimate: ConfidenceLevel
+    last_explained_at_message_id: str | None = None
+    student_signal: str | None = None
+    likely_gap: str | None = None
+    recommended_intervention: str | None = None
+    supporting_evidence: list[str] = Field(default_factory=list)
+
+
+class StudentLearningState(ContractModel):
+    state_id: str
+    topics: list[StudentLearningTopicState] = Field(default_factory=list)
+    update_notes: list[str] = Field(default_factory=list)
+    updated_at: datetime
+
+
+class TeacherWorkingLog(ContractModel):
+    log_id: str
+    current_teaching_objective: str
+    why_now: str
+    active_topic_refs: list[TopicRef] = Field(default_factory=list)
+    current_plan_step_id: str | None = None
+    planned_transition: str | None = None
+    student_risk_notes: list[str] = Field(default_factory=list)
+    recent_decisions: list[str] = Field(default_factory=list)
+    open_questions: list[str] = Field(default_factory=list)
+    updated_at: datetime
+
+
+class TeachingDecisionSnapshot(ContractModel):
+    decision_id: str
+    scenario: PromptScenario
+    user_message_summary: str | None = None
+    selected_action: TeachingDecisionAction
+    selected_plan_step_id: str | None = None
+    selected_plan_step_title: str | None = None
+    teaching_objective: str
+    decision_reason: str
+    student_state_notes: list[str] = Field(default_factory=list)
+    planned_transition: str | None = None
+    topic_refs: list[TopicRef] = Field(default_factory=list)
+    created_at: datetime
+
+
+class TeachingDebugEvent(ContractModel):
+    debug_event_id: str
+    event_type: TeachingDebugEventType
+    occurred_at: datetime
+    message_id: str | None = None
+    plan_step_id: str | None = None
+    summary: str
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
 class ConversationState(ContractModel):
     current_repo_id: str | None = None
     current_learning_goal: LearningGoal = LearningGoal.OVERVIEW
@@ -527,6 +610,11 @@ class ConversationState(ContractModel):
     depth_level: DepthLevel = DepthLevel.DEFAULT
     messages: list[MessageRecord] = Field(default_factory=list)
     history_summary: str | None = None
+    teaching_plan_state: TeachingPlanState | None = None
+    student_learning_state: StudentLearningState | None = None
+    teacher_working_log: TeacherWorkingLog | None = None
+    current_teaching_decision: TeachingDecisionSnapshot | None = None
+    teaching_debug_events: list[TeachingDebugEvent] = Field(default_factory=list)
     sub_status: ConversationSubStatus | None = None
 
 

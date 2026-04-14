@@ -211,6 +211,41 @@ class DepthLevel(StrEnum):
     DEEP = "deep"
 
 
+class TeachingPlanStepStatus(StrEnum):
+    PLANNED = "planned"
+    ACTIVE = "active"
+    COMPLETED = "completed"
+    DEFERRED = "deferred"
+    CANCELLED = "cancelled"
+
+
+class StudentCoverageLevel(StrEnum):
+    UNSEEN = "unseen"
+    INTRODUCED = "introduced"
+    PARTIALLY_GRASPED = "partially_grasped"
+    NEEDS_REINFORCEMENT = "needs_reinforcement"
+    TEMPORARILY_STABLE = "temporarily_stable"
+
+
+class TeachingDecisionAction(StrEnum):
+    PROCEED_WITH_PLAN = "proceed_with_plan"
+    ADAPT_TO_USER_GOAL = "adapt_to_user_goal"
+    REINFORCE_STUDENT_GAP = "reinforce_student_gap"
+    SUMMARIZE_PROGRESS = "summarize_progress"
+    ANSWER_LOCAL_QUESTION = "answer_local_question"
+
+
+class TeachingDebugEventType(StrEnum):
+    TEACHING_STATE_INITIALIZED = "teaching_state_initialized"
+    TEACHER_TURN_STARTED = "teacher_turn_started"
+    TEACHING_PLAN_SELECTED = "teaching_plan_selected"
+    TEACHING_DECISION_BUILT = "teaching_decision_built"
+    TEACHING_PLAN_UPDATED = "teaching_plan_updated"
+    STUDENT_STATE_UPDATED = "student_state_updated"
+    WORKING_LOG_UPDATED = "working_log_updated"
+    NEXT_TRANSITION_SELECTED = "next_transition_selected"
+
+
 class MessageRole(StrEnum):
     USER = "user"
     AGENT = "agent"
@@ -306,4 +341,3 @@ class ErrorCode(StrEnum):
     LLM_API_FAILED = "llm_api_failed"
     LLM_API_TIMEOUT = "llm_api_timeout"
     INVALID_STATE = "invalid_state"
-

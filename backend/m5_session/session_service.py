@@ -10,7 +10,6 @@ from backend.contracts.domain import (
     ConversationState,
     DegradationFlag,
     ExplainedItemRef,
-    InitialReportContent,
     InitialReportAnswer,
     MessageRecord,
     OutputContract,
@@ -58,6 +57,7 @@ from backend.contracts.enums import (
     RepoSourceType,
     RuntimeEventType,
     SessionStatus,
+    TeachingDebugEventType,
     TeachingStage,
 )
 from backend.m1_repo_access import access_repository
@@ -69,6 +69,16 @@ from backend.m5_session.state_machine import (
     assert_sub_status_allowed,
     assert_transition_allowed,
     view_for_status,
+)
+from backend.m5_session.teaching_state import (
+    append_teaching_debug_event,
+    build_teaching_decision,
+    build_initial_student_learning_state,
+    build_initial_teacher_working_log,
+    build_initial_teaching_plan,
+    plan_based_suggestions,
+    update_after_initial_report,
+    update_after_structured_answer,
 )
 from backend.m6_response.answer_generator import (
     LlmStreamer,
@@ -296,11 +306,10 @@ class SessionService:
             self._cleanup_temp_resources(active.temp_resources)
         self.store.active_session = None
 
-    def run_initial_analysis(self, session_id: str) -> list[RuntimeEvent]:
+    async def run_initial_analysis(self, session_id: str) -> list[RuntimeEvent]:
         session = self.assert_session_matches(session_id)
-        if (
-            session.status == SessionStatus.CHATTING
-            and self.latest_initial_report_completed_event(session_id)
+        if session.status == SessionStatus.CHATTING and self.latest_initial_report_completed_event(
+            session_id
         ):
             return []
 
@@ -366,6 +375,7 @@ class SessionService:
 
             skeleton = assemble_teaching_skeleton(analysis)
             session.teaching_skeleton = skeleton
+            self._initialize_teaching_state(session)
             self._set_progress_step(
                 session,
                 ProgressStepKey.SKELETON_ASSEMBLY,
@@ -373,7 +383,7 @@ class SessionService:
                 "教学骨架组装完成",
             )
 
-            initial_answer = self._build_initial_report_answer(session)
+            initial_answer = await self._generate_initial_report_answer(session)
             self._set_progress_step(
                 session,
                 ProgressStepKey.INITIAL_REPORT_GENERATION,
@@ -533,6 +543,13 @@ class SessionService:
         )
         session.last_error = None
         self._record_explained_items(session, answer, message.message_id)
+        self._update_teaching_state_after_answer(
+            session,
+            answer,
+            user_text=prompt_input.user_message or "",
+            message_id=message.message_id,
+            scenario=prompt_input.scenario,
+        )
         self._update_history_summary(session)
         completion_start_index = len(session.runtime_events)
         self._transition_status(session, SessionStatus.CHATTING, ConversationSubStatus.WAITING_USER)
@@ -543,6 +560,90 @@ class SessionService:
             RuntimeEventType.MESSAGE_COMPLETED,
             message_id=message.message_id,
             payload={"message": message.model_dump(mode="python")},
+        )
+
+    async def _generate_initial_report_answer(self, session: SessionContext) -> InitialReportAnswer:
+        prompt_input = self._build_initial_report_prompt_input(session)
+        answer_id = new_id("msg_agent_init")
+        raw_chunks: list[str] = []
+        visible_buffer = ""
+        json_output_started = False
+        json_marker = "<json_output>"
+        marker_tail_size = len(json_marker) - 1
+
+        self._append_runtime_event(
+            session,
+            RuntimeEventType.ANSWER_STREAM_START,
+            message_id=answer_id,
+            payload={"message_type": MessageType.INITIAL_REPORT},
+        )
+
+        async for chunk in stream_answer_text(prompt_input, llm_streamer=self.llm_streamer):
+            raw_chunks.append(chunk)
+            if json_output_started:
+                continue
+            visible_buffer += chunk
+            marker_index = visible_buffer.find(json_marker)
+            if marker_index >= 0:
+                visible_chunk = visible_buffer[:marker_index]
+                visible_buffer = ""
+                json_output_started = True
+            elif len(visible_buffer) > marker_tail_size:
+                visible_chunk = visible_buffer[:-marker_tail_size]
+                visible_buffer = visible_buffer[-marker_tail_size:]
+            else:
+                visible_chunk = ""
+            if visible_chunk:
+                self._append_runtime_event(
+                    session,
+                    RuntimeEventType.ANSWER_STREAM_DELTA,
+                    message_id=answer_id,
+                    message_chunk=visible_chunk,
+                )
+
+        if visible_buffer and not json_output_started:
+            self._append_runtime_event(
+                session,
+                RuntimeEventType.ANSWER_STREAM_DELTA,
+                message_id=answer_id,
+                message_chunk=visible_buffer,
+            )
+
+        raw_text = "".join(raw_chunks).strip()
+        if not raw_text:
+            raise RuntimeError("LLM returned an empty initial report")
+
+        self._append_runtime_event(
+            session,
+            RuntimeEventType.ANSWER_STREAM_END,
+            message_id=answer_id,
+        )
+
+        parsed_answer = parse_answer(prompt_input, raw_text)
+        if not isinstance(parsed_answer, InitialReportAnswer):
+            raise RuntimeError("M6 returned a non-initial-report answer for initial analysis")
+
+        answer = parsed_answer.model_copy(update={"answer_id": answer_id})
+        self._ensure_initial_report_suggestions(session, answer)
+        return answer
+
+    def _build_initial_report_prompt_input(self, session: SessionContext) -> PromptBuildInput:
+        topic_slice = self._topic_slice_for_goal(session.teaching_skeleton, LearningGoal.OVERVIEW)
+        self._prepare_teaching_decision(
+            session,
+            user_text="请先带我建立这个仓库的整体理解，并给出一条主动引导的阅读计划。",
+            scenario=PromptScenario.INITIAL_REPORT,
+            topic_slice=topic_slice,
+        )
+        return PromptBuildInput(
+            scenario=PromptScenario.INITIAL_REPORT,
+            user_message="请先带我建立这个仓库的整体理解，并给出一条主动引导的阅读计划。",
+            teaching_skeleton=session.teaching_skeleton,
+            topic_slice=topic_slice,
+            conversation_state=session.conversation.model_copy(deep=True),
+            history_summary=None,
+            depth_level=session.conversation.depth_level,
+            output_contract=self._output_contract(session.conversation.depth_level),
         )
 
     def _build_prompt_input(self, session: SessionContext) -> PromptBuildInput:
@@ -561,12 +662,20 @@ class SessionService:
 
         session.conversation.current_learning_goal = goal
         session.conversation.depth_level = depth
+        topic_slice = self._topic_slice_for_goal(session.teaching_skeleton, goal)
+        self._prepare_teaching_decision(
+            session,
+            user_text=user_text,
+            scenario=scenario,
+            topic_slice=topic_slice,
+            message_id=last_user_message.message_id,
+        )
 
         return PromptBuildInput(
             scenario=scenario,
             user_message=user_text,
             teaching_skeleton=session.teaching_skeleton,
-            topic_slice=self._topic_slice_for_goal(session.teaching_skeleton, goal),
+            topic_slice=topic_slice,
             conversation_state=session.conversation.model_copy(deep=True),
             history_summary=self._history_summary(session),
             depth_level=depth,
@@ -597,7 +706,18 @@ class SessionService:
         normalized = user_text.casefold()
         return any(
             token in normalized
-            for token in ("深入", "详细", "展开", "讲深", "简单", "概括", "浅", "brief", "short", "deep")
+            for token in (
+                "深入",
+                "详细",
+                "展开",
+                "讲深",
+                "简单",
+                "概括",
+                "浅",
+                "brief",
+                "short",
+                "deep",
+            )
         )
 
     def _infer_learning_goal(self, session: SessionContext, user_text: str) -> LearningGoal:
@@ -702,16 +822,243 @@ class SessionService:
         session: SessionContext,
         answer: StructuredAnswer,
     ) -> None:
-        if answer.suggestions:
-            answer.suggestions = answer.suggestions[:3]
-            answer.structured_content.next_steps = answer.suggestions
-            return
-        suggestions = generate_next_step_suggestions(
-            session.conversation,
-            self._all_topic_refs(session.teaching_skeleton),
+        suggestions = self._merge_teacher_suggestions(
+            answer.suggestions,
+            plan_based_suggestions(session.conversation),
         )
+        if not suggestions:
+            suggestions = generate_next_step_suggestions(
+                session.conversation,
+                self._all_topic_refs(session.teaching_skeleton),
+            )
         answer.suggestions = suggestions
         answer.structured_content.next_steps = suggestions
+
+    def _ensure_initial_report_suggestions(
+        self,
+        session: SessionContext,
+        answer: InitialReportAnswer,
+    ) -> None:
+        suggestions = self._merge_teacher_suggestions(
+            answer.suggestions,
+            plan_based_suggestions(session.conversation),
+        )
+        if not suggestions:
+            suggestions = session.teaching_skeleton.suggested_next_questions[:3]
+        answer.suggestions = suggestions
+        answer.initial_report_content.suggested_next_questions = suggestions
+
+    def _merge_teacher_suggestions(self, primary: list, secondary: list) -> list:
+        merged = []
+        seen_texts: set[str] = set()
+        for suggestion in [*primary, *secondary]:
+            if len(merged) >= 3:
+                break
+            text = suggestion.text.strip()
+            if not text or text in seen_texts:
+                continue
+            merged.append(suggestion)
+            seen_texts.add(text)
+        return merged
+
+    def _prepare_teaching_decision(
+        self,
+        session: SessionContext,
+        *,
+        user_text: str,
+        scenario: PromptScenario,
+        topic_slice: list[TopicRef],
+        message_id: str | None = None,
+    ) -> None:
+        now = utc_now()
+        active_step = None
+        if session.conversation.teaching_plan_state:
+            active_step = next(
+                (
+                    step
+                    for step in session.conversation.teaching_plan_state.steps
+                    if step.status == "active"
+                ),
+                None,
+            )
+        append_teaching_debug_event(
+            session.conversation,
+            TeachingDebugEventType.TEACHER_TURN_STARTED,
+            summary="老师开始本轮教学决策。",
+            now=now,
+            message_id=message_id,
+            plan_step_id=active_step.step_id if active_step else None,
+            details={
+                "scenario": scenario,
+                "current_learning_goal": session.conversation.current_learning_goal,
+                "topic_ref_count": len(topic_slice),
+            },
+        )
+        if active_step:
+            append_teaching_debug_event(
+                session.conversation,
+                TeachingDebugEventType.TEACHING_PLAN_SELECTED,
+                summary=f"选中教学计划步骤：{active_step.title}",
+                now=now,
+                message_id=message_id,
+                plan_step_id=active_step.step_id,
+                details={
+                    "goal": active_step.goal,
+                    "target_scope": active_step.target_scope,
+                    "status": active_step.status,
+                },
+            )
+        decision = build_teaching_decision(
+            session.conversation,
+            user_text=user_text,
+            scenario=scenario,
+            topic_slice=topic_slice,
+            now=now,
+        )
+        session.conversation.current_teaching_decision = decision
+        append_teaching_debug_event(
+            session.conversation,
+            TeachingDebugEventType.TEACHING_DECISION_BUILT,
+            summary=decision.decision_reason,
+            now=now,
+            message_id=message_id,
+            plan_step_id=decision.selected_plan_step_id,
+            details={
+                "decision_id": decision.decision_id,
+                "selected_action": decision.selected_action,
+                "teaching_objective": decision.teaching_objective,
+                "student_state_notes": decision.student_state_notes,
+            },
+        )
+
+    def _initialize_teaching_state(self, session: SessionContext) -> None:
+        now = utc_now()
+        plan = build_initial_teaching_plan(session.teaching_skeleton, now=now)
+        student_state = build_initial_student_learning_state(session.teaching_skeleton, now=now)
+        teacher_log = build_initial_teacher_working_log(
+            session.teaching_skeleton,
+            plan,
+            student_state,
+            now=now,
+        )
+        session.conversation.teaching_plan_state = plan
+        session.conversation.student_learning_state = student_state
+        session.conversation.teacher_working_log = teacher_log
+        append_teaching_debug_event(
+            session.conversation,
+            TeachingDebugEventType.TEACHING_STATE_INITIALIZED,
+            summary="已初始化教学计划、学生学习状态和教师工作日志。",
+            now=now,
+            plan_step_id=plan.current_step_id,
+            details={
+                "plan_step_count": len(plan.steps),
+                "student_topic_count": len(student_state.topics),
+            },
+        )
+        append_teaching_debug_event(
+            session.conversation,
+            TeachingDebugEventType.TEACHING_PLAN_SELECTED,
+            summary="初始教学计划已选中第一步。",
+            now=now,
+            plan_step_id=plan.current_step_id,
+            details={"current_step_id": plan.current_step_id},
+        )
+
+    def _update_teaching_state_after_initial_report(
+        self,
+        session: SessionContext,
+        answer: InitialReportAnswer,
+        message_id: str,
+    ) -> None:
+        update = update_after_initial_report(
+            session.conversation,
+            answer,
+            message_id=message_id,
+            now=utc_now(),
+        )
+        session.conversation.teaching_plan_state = update.teaching_plan_state
+        session.conversation.student_learning_state = update.student_learning_state
+        session.conversation.teacher_working_log = update.teacher_working_log
+        self._record_teaching_state_update_events(session, message_id=message_id)
+
+    def _update_teaching_state_after_answer(
+        self,
+        session: SessionContext,
+        answer: StructuredAnswer,
+        *,
+        user_text: str,
+        message_id: str,
+        scenario: PromptScenario,
+    ) -> None:
+        update = update_after_structured_answer(
+            session.conversation,
+            answer,
+            user_text=user_text,
+            message_id=message_id,
+            scenario=scenario,
+            now=utc_now(),
+        )
+        session.conversation.teaching_plan_state = update.teaching_plan_state
+        session.conversation.student_learning_state = update.student_learning_state
+        session.conversation.teacher_working_log = update.teacher_working_log
+        self._record_teaching_state_update_events(session, message_id=message_id)
+
+    def _record_teaching_state_update_events(
+        self,
+        session: SessionContext,
+        *,
+        message_id: str,
+    ) -> None:
+        now = utc_now()
+        plan = session.conversation.teaching_plan_state
+        student_state = session.conversation.student_learning_state
+        teacher_log = session.conversation.teacher_working_log
+        active_step_id = plan.current_step_id if plan else None
+        append_teaching_debug_event(
+            session.conversation,
+            TeachingDebugEventType.TEACHING_PLAN_UPDATED,
+            summary="教学计划已根据本轮结果更新。",
+            now=now,
+            message_id=message_id,
+            plan_step_id=active_step_id,
+            details={
+                "current_step_id": active_step_id,
+                "update_notes": plan.update_notes[-3:] if plan else [],
+            },
+        )
+        append_teaching_debug_event(
+            session.conversation,
+            TeachingDebugEventType.STUDENT_STATE_UPDATED,
+            summary="学生学习状态表已根据本轮教学信号更新。",
+            now=now,
+            message_id=message_id,
+            plan_step_id=active_step_id,
+            details={
+                "update_notes": student_state.update_notes[-3:] if student_state else [],
+                "topic_count": len(student_state.topics) if student_state else 0,
+            },
+        )
+        append_teaching_debug_event(
+            session.conversation,
+            TeachingDebugEventType.WORKING_LOG_UPDATED,
+            summary="教师工作日志已更新。",
+            now=now,
+            message_id=message_id,
+            plan_step_id=active_step_id,
+            details={
+                "objective": teacher_log.current_teaching_objective if teacher_log else None,
+                "recent_decisions": teacher_log.recent_decisions[-3:] if teacher_log else [],
+            },
+        )
+        append_teaching_debug_event(
+            session.conversation,
+            TeachingDebugEventType.NEXT_TRANSITION_SELECTED,
+            summary=teacher_log.planned_transition if teacher_log else "暂无下一步过渡。",
+            now=now,
+            message_id=message_id,
+            plan_step_id=active_step_id,
+            details={"planned_transition": teacher_log.planned_transition if teacher_log else None},
+        )
 
     def _record_explained_items(
         self,
@@ -719,10 +1066,7 @@ class SessionService:
         answer: StructuredAnswer,
         message_id: str,
     ) -> None:
-        seen = {
-            (item.item_type, item.item_id)
-            for item in session.conversation.explained_items
-        }
+        seen = {(item.item_type, item.item_id) for item in session.conversation.explained_items}
         for ref in answer.related_topic_refs[:6]:
             key = (ref.ref_type, ref.target_id)
             if key in seen:
@@ -1067,31 +1411,6 @@ class SessionService:
             )
         return None
 
-    def _build_initial_report_answer(self, session: SessionContext) -> InitialReportAnswer:
-        skeleton = session.teaching_skeleton
-        raw_text = (
-            f"已完成对 {session.repository.display_name} 的基础接入。"
-            f"当前建议先阅读 {skeleton.recommended_first_step.target}，从整体结构与入口线索开始理解。"
-        )
-        return InitialReportAnswer(
-            answer_id=new_id("msg_agent_init"),
-            message_type=MessageType.INITIAL_REPORT,
-            raw_text=raw_text,
-            initial_report_content=InitialReportContent(
-                overview=skeleton.overview,
-                focus_points=skeleton.focus_points,
-                repo_mapping=skeleton.repo_mapping,
-                language_and_type=skeleton.language_and_type,
-                key_directories=skeleton.key_directories,
-                entry_section=skeleton.entry_section,
-                recommended_first_step=skeleton.recommended_first_step,
-                reading_path_preview=skeleton.reading_path_preview,
-                unknown_section=skeleton.unknown_section,
-                suggested_next_questions=skeleton.suggested_next_questions,
-            ),
-            suggestions=skeleton.suggested_next_questions,
-        )
-
     def _complete_initial_report(
         self,
         session: SessionContext,
@@ -1111,6 +1430,11 @@ class SessionService:
         session.conversation.messages.append(message)
         session.conversation.last_suggestions = answer.suggestions
         session.conversation.current_stage = TeachingStage.INITIAL_REPORT
+        self._update_teaching_state_after_initial_report(
+            session,
+            answer,
+            message.message_id,
+        )
         self._append_runtime_event(
             session,
             RuntimeEventType.MESSAGE_COMPLETED,

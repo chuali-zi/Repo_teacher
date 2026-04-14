@@ -23,7 +23,6 @@ from backend.contracts.enums import (
     LearningGoal,
     MessageType,
     PromptScenario,
-    WarningType,
 )
 
 _JSON_BLOCK_RE = re.compile(r"<json_output>\s*(\{.*\})\s*</json_output>", re.DOTALL)

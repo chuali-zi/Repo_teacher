@@ -11,10 +11,15 @@ from backend.contracts.domain import RuntimeEvent
 from backend.contracts.enums import (
     ConversationSubStatus,
     ErrorCode,
+    LearningGoal,
     MessageRole,
     MessageType,
     RuntimeEventType,
     SessionStatus,
+    StudentCoverageLevel,
+    TeachingDebugEventType,
+    TeachingDecisionAction,
+    TeachingPlanStepStatus,
 )
 from backend.m5_session import session_service
 from backend.m5_session.event_mapper import runtime_event_to_sse
@@ -28,6 +33,39 @@ def fake_llm_streamer():
 
     async def stream(messages: list[dict[str, str]]):
         captured.append(messages)
+        prompt = _message_text(messages)
+        if "当前场景: initial_report" in prompt:
+            prompt_payload = _prompt_payload(messages)
+            skeleton = prompt_payload["teaching_skeleton"]
+            payload = {
+                "initial_report_content": {
+                    "overview": skeleton["overview"],
+                    "focus_points": skeleton["focus_points"],
+                    "repo_mapping": skeleton["repo_mapping"],
+                    "language_and_type": skeleton["language_and_type"],
+                    "key_directories": skeleton["key_directories"],
+                    "entry_section": skeleton["entry_section"],
+                    "recommended_first_step": skeleton["recommended_first_step"],
+                    "reading_path_preview": skeleton["reading_path_preview"],
+                    "unknown_section": skeleton["unknown_section"],
+                    "suggested_next_questions": skeleton["suggested_next_questions"],
+                },
+                "suggestions": skeleton["suggested_next_questions"],
+                "used_evidence_refs": [],
+            }
+            first_target = skeleton["recommended_first_step"]["target"]
+            text = (
+                "## 仓库概览\n"
+                f"这个仓库我会先带你抓整体结构，再落到 {first_target} 这个起点。\n\n"
+                "## 推荐阅读计划\n"
+                f"1. 先看 {first_target}。\n"
+                "2. 再回头看关键目录和模块关系。\n"
+                f"\n<json_output>{json.dumps(payload, ensure_ascii=False)}</json_output>"
+            )
+            midpoint = len(text) // 2
+            yield text[:midpoint]
+            yield text[midpoint:]
+            return
         label = _prompt_label(_message_text(messages))
         payload = {
             "focus": f"LLM focus: {label}",
@@ -85,6 +123,13 @@ def _prompt_label(prompt: str) -> str:
     return "follow-up question"
 
 
+def _prompt_payload(messages: list[dict[str, str]]) -> dict:
+    system_message = messages[0]["content"]
+    marker = "以下是当前仓库的教学参考素材（教学骨架、主题切片、会话状态和历史摘要），请基于这些素材回答："
+    payload_text = system_message.split(marker, 1)[1].strip()
+    return json.loads(payload_text)
+
+
 def test_analysis_stream_completes_initial_report_for_local_repo(tmp_path: Path) -> None:
     (tmp_path / "README.md").write_text("# demo\n", encoding="utf-8")
     (tmp_path / "main.py").write_text("print('hi')\n", encoding="utf-8")
@@ -98,12 +143,35 @@ def test_analysis_stream_completes_initial_report_for_local_repo(tmp_path: Path)
     assert any(event.event_type == RuntimeEventType.ANALYSIS_PROGRESS for event in events)
     assert events[-1].event_type == RuntimeEventType.MESSAGE_COMPLETED
     assert events[-1].message.message_type == MessageType.INITIAL_REPORT
+    assert events[-1].message.raw_text.startswith("## 仓库概览")
 
     snapshot = session_service.get_snapshot(session_service.store.active_session.session_id)
     assert snapshot.status == SessionStatus.CHATTING
     assert snapshot.sub_status == ConversationSubStatus.WAITING_USER
     assert snapshot.messages[-1].message_type == MessageType.INITIAL_REPORT
     assert all(item.step_state == "done" for item in snapshot.progress_steps)
+
+    conversation = session_service.store.active_session.conversation
+    assert conversation.teaching_plan_state is not None
+    assert conversation.student_learning_state is not None
+    assert conversation.teacher_working_log is not None
+    assert conversation.teaching_plan_state.steps[0].status == TeachingPlanStepStatus.ACTIVE
+    overview_state = _topic_state(conversation.student_learning_state, LearningGoal.OVERVIEW)
+    assert overview_state.coverage_level == StudentCoverageLevel.INTRODUCED
+    assert (
+        conversation.teacher_working_log.current_plan_step_id
+        == conversation.teaching_plan_state.current_step_id
+    )
+    assert conversation.current_teaching_decision is not None
+    assert conversation.current_teaching_decision.selected_action in {
+        TeachingDecisionAction.PROCEED_WITH_PLAN,
+        TeachingDecisionAction.ANSWER_LOCAL_QUESTION,
+    }
+    assert _debug_event_types(conversation)[:2] == [
+        TeachingDebugEventType.TEACHING_STATE_INITIALIZED,
+        TeachingDebugEventType.TEACHING_PLAN_SELECTED,
+    ]
+    assert TeachingDebugEventType.TEACHING_DECISION_BUILT in _debug_event_types(conversation)
 
     session_service.clear_active_session()
 
@@ -161,6 +229,33 @@ def test_chat_stream_completes_followup_answer(tmp_path: Path, fake_llm_streamer
     direct_explanation = snapshot.messages[-1].structured_content.direct_explanation
     assert direct_explanation.startswith("LLM direct answer")
     assert "后续 M2-M4/M6 实现补齐" not in snapshot.messages[-1].raw_text
+    assert any("当前场景: initial_report" in _message_text(item) for item in fake_llm_streamer)
+
+    prompt_payload = _prompt_payload(fake_llm_streamer[-1])
+    assert prompt_payload["teaching_plan"]["steps"]
+    assert prompt_payload["student_learning_state"]["topics"]
+    assert prompt_payload["teacher_working_log"]["current_teaching_objective"]
+    assert prompt_payload["teaching_decision"]["teaching_objective"]
+    assert prompt_payload["teaching_decision"]["selected_action"]
+
+    conversation = session_service.store.active_session.conversation
+    assert any(
+        step.status == TeachingPlanStepStatus.ACTIVE
+        for step in conversation.teaching_plan_state.steps
+    )
+    structure_state = _topic_state(conversation.student_learning_state, LearningGoal.STRUCTURE)
+    assert structure_state.coverage_level in {
+        StudentCoverageLevel.INTRODUCED,
+        StudentCoverageLevel.PARTIALLY_GRASPED,
+    }
+    assert structure_state.last_explained_at_message_id == snapshot.messages[-1].message_id
+    assert conversation.teacher_working_log.recent_decisions
+    debug_event_types = _debug_event_types(conversation)
+    assert TeachingDebugEventType.TEACHER_TURN_STARTED in debug_event_types
+    assert TeachingDebugEventType.TEACHING_PLAN_UPDATED in debug_event_types
+    assert TeachingDebugEventType.STUDENT_STATE_UPDATED in debug_event_types
+    assert TeachingDebugEventType.WORKING_LOG_UPDATED in debug_event_types
+    assert TeachingDebugEventType.NEXT_TRANSITION_SELECTED in debug_event_types
 
     session_service.clear_active_session()
 
@@ -197,7 +292,6 @@ def test_chat_stream_reports_llm_failure_without_fallback_answer(tmp_path: Path)
         raise RuntimeError("provider unavailable")
         yield ""
 
-    session_service.llm_streamer = failing_streamer
     (tmp_path / "README.md").write_text("# demo\n", encoding="utf-8")
     (tmp_path / "app.py").write_text("print('hi')\n", encoding="utf-8")
 
@@ -205,6 +299,7 @@ def test_chat_stream_reports_llm_failure_without_fallback_answer(tmp_path: Path)
     session_id = session_service.store.active_session.session_id
     asyncio.run(_collect(iter_analysis_events(session_id)))
 
+    session_service.llm_streamer = failing_streamer
     session_service.accept_chat_message(session_id, "first question")
     events = asyncio.run(_collect(iter_chat_events(session_id)))
 
@@ -234,9 +329,7 @@ def test_pending_chat_turn_does_not_replay_previous_completion(tmp_path: Path) -
     session_service.accept_chat_message(session_id, "second question")
     second_events = asyncio.run(_collect(iter_chat_events(session_id)))
     first_non_status = next(
-        event
-        for event in second_events
-        if event.event_type != RuntimeEventType.STATUS_CHANGED
+        event for event in second_events if event.event_type != RuntimeEventType.STATUS_CHANGED
     )
 
     assert first_non_status.event_type == RuntimeEventType.ANSWER_STREAM_START
@@ -330,3 +423,11 @@ def test_runtime_event_to_sse_maps_message_completed_payload() -> None:
 
 async def _collect(iterator) -> list:
     return [item async for item in iterator]
+
+
+def _topic_state(student_learning_state, goal: LearningGoal):
+    return next(item for item in student_learning_state.topics if item.topic == goal)
+
+
+def _debug_event_types(conversation):
+    return [item.event_type for item in conversation.teaching_debug_events]

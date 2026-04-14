@@ -19,7 +19,6 @@ from backend.contracts.domain import (
     MessageRecord,
     OutputContract,
     OverviewSection,
-    ProgressStepStateItem,
     PromptBuildInput,
     RecommendedStep,
     TeachingSkeleton,
@@ -30,17 +29,18 @@ from backend.contracts.enums import (
     ConversationSubStatus,
     DerivedStatus,
     DepthLevel,
-    LayerType,
     LearningGoal,
     MainPathRole,
     MessageSection,
     MessageRole,
     MessageType,
     PromptScenario,
-    ProgressStepKey,
-    ProgressStepState,
+    ReadingTargetType,
     SkeletonMode,
+    StudentCoverageLevel,
     TeachingStage,
+    TeachingDecisionAction,
+    TeachingPlanStepStatus,
     TopicRefType,
 )
 from backend.m6_response.llm_caller import load_llm_config
@@ -77,7 +77,7 @@ def test_build_messages_for_follow_up_includes_context_and_history() -> None:
                         created_at=datetime.now(UTC),
                         raw_text=(
                             "可以先看 backend/main.py。"
-                            "\n<json_output>{\"focus\":\"entry\"}</json_output>"
+                            '\n<json_output>{"focus":"entry"}</json_output>'
                         ),
                         structured_content={
                             "focus": "入口",
@@ -109,6 +109,101 @@ def test_build_messages_for_follow_up_includes_context_and_history() -> None:
     assistant_history = [item for item in messages if item["role"] == "assistant"]
     assert assistant_history
     assert "<json_output>" not in assistant_history[-1]["content"]
+
+
+def test_build_messages_for_initial_report_includes_teacher_memory_and_teaching_plan() -> None:
+    now = datetime.now(UTC)
+    messages = build_messages(
+        PromptBuildInput(
+            scenario=PromptScenario.INITIAL_REPORT,
+            user_message="请先带我建立这个仓库的整体理解，并给出一条主动引导的阅读计划。",
+            teaching_skeleton=_teaching_skeleton(),
+            topic_slice=[_topic_ref("ref_structure", LearningGoal.STRUCTURE, "仓库结构")],
+            conversation_state=ConversationState(
+                current_repo_id="repo_1",
+                current_learning_goal=LearningGoal.OVERVIEW,
+                current_stage=TeachingStage.NOT_STARTED,
+                teaching_plan_state={
+                    "plan_id": "plan_1",
+                    "generated_from_skeleton_id": "sk_1",
+                    "current_step_id": "plan_step_1",
+                    "steps": [
+                        {
+                            "step_id": "plan_step_1",
+                            "title": "先定位入口",
+                            "goal": LearningGoal.ENTRY,
+                            "target_scope": "backend/main.py",
+                            "reason": "入口能帮学生建立第一条主线。",
+                            "expected_learning_gain": "知道系统从哪里开始看。",
+                            "status": TeachingPlanStepStatus.ACTIVE,
+                            "priority": 1,
+                            "depends_on": [],
+                            "source_topic_refs": [],
+                            "adaptation_note": None,
+                        }
+                    ],
+                    "update_notes": ["初始化教学计划。"],
+                    "updated_at": now,
+                },
+                student_learning_state={
+                    "state_id": "student_1",
+                    "topics": [
+                        {
+                            "topic": LearningGoal.ENTRY,
+                            "coverage_level": StudentCoverageLevel.NEEDS_REINFORCEMENT,
+                            "confidence_of_estimate": ConfidenceLevel.MEDIUM,
+                            "last_explained_at_message_id": "msg_1",
+                            "student_signal": "用户说入口没懂。",
+                            "likely_gap": "入口概念还没有和仓库文件连起来。",
+                            "recommended_intervention": "先换一种说法补框架。",
+                            "supporting_evidence": [],
+                        }
+                    ],
+                    "update_notes": ["入口需要强化。"],
+                    "updated_at": now,
+                },
+                teacher_working_log={
+                    "log_id": "log_1",
+                    "current_teaching_objective": "补清楚入口和仓库起点",
+                    "why_now": "学生还没有把入口和文件位置连起来。",
+                    "active_topic_refs": [],
+                    "current_plan_step_id": "plan_step_1",
+                    "planned_transition": "补完入口后再进入主流程。",
+                    "student_risk_notes": ["entry: 入口需要强化。"],
+                    "recent_decisions": ["根据学生信号先补入口。"],
+                    "open_questions": [],
+                    "updated_at": now,
+                },
+                current_teaching_decision={
+                    "decision_id": "decision_1",
+                    "scenario": PromptScenario.INITIAL_REPORT,
+                    "user_message_summary": "请先带我建立这个仓库的整体理解",
+                    "selected_action": TeachingDecisionAction.REINFORCE_STUDENT_GAP,
+                    "selected_plan_step_id": "plan_step_1",
+                    "selected_plan_step_title": "先定位入口",
+                    "teaching_objective": "先补清楚入口",
+                    "decision_reason": "学生状态表显示入口需要强化。",
+                    "student_state_notes": ["entry: 先换一种说法补框架。"],
+                    "planned_transition": "补完入口后再进入主流程。",
+                    "topic_refs": [],
+                    "created_at": now,
+                },
+            ),
+            history_summary=None,
+            depth_level=DepthLevel.DEFAULT,
+            output_contract=_output_contract(),
+        )
+    )
+
+    assert messages[0]["role"] == "system"
+    assert "teacher_memory" in messages[0]["content"]
+    assert "teaching_plan" in messages[0]["content"]
+    assert "student_learning_state" in messages[0]["content"]
+    assert "teacher_working_log" in messages[0]["content"]
+    assert "teaching_decision" in messages[0]["content"]
+    assert "reinforce_student_gap" in messages[0]["content"]
+    assert "needs_reinforcement" in messages[0]["content"]
+    assert "backend/main.py" in messages[0]["content"]
 
 
 def test_parse_final_answer_reads_structured_follow_up_payload() -> None:
@@ -169,10 +264,14 @@ def test_parse_final_answer_falls_back_to_minimum_valid_structure() -> None:
 
 def test_parse_initial_report_uses_controlled_payload() -> None:
     content = InitialReportContent(
-        overview=OverviewSection(summary="这是一个后端 API 服务。", confidence=ConfidenceLevel.HIGH, evidence_refs=[]),
+        overview=OverviewSection(
+            summary="这是一个后端 API 服务。", confidence=ConfidenceLevel.HIGH, evidence_refs=[]
+        ),
         focus_points=[],
         repo_mapping=[],
-        language_and_type=LanguageTypeSection(primary_language="Python", project_types=[], degradation_notice=None),
+        language_and_type=LanguageTypeSection(
+            primary_language="Python", project_types=[], degradation_notice=None
+        ),
         key_directories=[
             KeyDirectoryItem(
                 path="backend/",
@@ -182,7 +281,9 @@ def test_parse_initial_report_uses_controlled_payload() -> None:
                 evidence_refs=[],
             )
         ],
-        entry_section=EntrySection(status=DerivedStatus.HEURISTIC, entries=[], fallback_advice=None, unknown_items=[]),
+        entry_section=EntrySection(
+            status=DerivedStatus.HEURISTIC, entries=[], fallback_advice=None, unknown_items=[]
+        ),
         recommended_first_step=RecommendedStep(
             target="backend/main.py",
             reason="这里负责应用装配。",
@@ -255,7 +356,9 @@ def test_generate_next_step_suggestions_skips_explained_and_limits_to_three() ->
         ],
     )
     topic_refs = [
-        _topic_ref("ref_done", LearningGoal.FLOW, "已讲主流程", TopicRefType.FLOW_SUMMARY, "flow_done"),
+        _topic_ref(
+            "ref_done", LearningGoal.FLOW, "已讲主流程", TopicRefType.FLOW_SUMMARY, "flow_done"
+        ),
         _topic_ref("ref_entry", LearningGoal.ENTRY, "入口候选"),
         _topic_ref("ref_module", LearningGoal.MODULE, "核心模块"),
         _topic_ref("ref_layer", LearningGoal.LAYER, "分层关系"),
@@ -277,12 +380,26 @@ def _teaching_skeleton() -> TeachingSkeleton:
         analysis_bundle_id="bundle_1",
         generated_at=datetime.now(UTC),
         skeleton_mode=SkeletonMode.FULL,
-        overview=OverviewSection(summary="仓库概览", confidence=ConfidenceLevel.HIGH, evidence_refs=[]),
-        focus_points=[],
+        overview=OverviewSection(
+            summary="仓库概览", confidence=ConfidenceLevel.HIGH, evidence_refs=[]
+        ),
+        focus_points=[
+            {
+                "focus_id": "focus_1",
+                "topic": LearningGoal.STRUCTURE,
+                "title": "先抓整体结构",
+                "reason": "先建立仓库地图再钻进细节。",
+                "related_refs": [],
+            }
+        ],
         repo_mapping=[],
-        language_and_type=LanguageTypeSection(primary_language="Python", project_types=[], degradation_notice=None),
+        language_and_type=LanguageTypeSection(
+            primary_language="Python", project_types=[], degradation_notice=None
+        ),
         key_directories=[],
-        entry_section=EntrySection(status=DerivedStatus.HEURISTIC, entries=[], fallback_advice=None, unknown_items=[]),
+        entry_section=EntrySection(
+            status=DerivedStatus.HEURISTIC, entries=[], fallback_advice=None, unknown_items=[]
+        ),
         flow_section=FlowSection(status=DerivedStatus.HEURISTIC, flows=[], fallback_advice=None),
         layer_section=LayerSection(
             status=DerivedStatus.HEURISTIC,
@@ -302,10 +419,26 @@ def _teaching_skeleton() -> TeachingSkeleton:
             learning_gain="能先看清应用装配方式。",
             evidence_refs=[],
         ),
-        reading_path_preview=[],
+        reading_path_preview=[
+            {
+                "step_no": 1,
+                "target": "backend/main.py",
+                "target_type": ReadingTargetType.FILE,
+                "reason": "先定位应用入口与装配方式。",
+                "learning_gain": "先建立入口与整体执行框架。",
+                "evidence_refs": [],
+            }
+        ],
         unknown_section=[],
         topic_index=TopicIndex(),
-        suggested_next_questions=[],
+        suggested_next_questions=[
+            {
+                "suggestion_id": "s1",
+                "text": "想先看入口候选吗？",
+                "target_goal": LearningGoal.ENTRY,
+                "related_topic_refs": [],
+            }
+        ],
     )
 
 

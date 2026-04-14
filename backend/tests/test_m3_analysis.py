@@ -9,8 +9,6 @@ from backend.contracts.enums import (
     FileNodeStatus,
     FileNodeType,
     ImportSourceType,
-    LayerType,
-    MainPathRole,
     UnknownTopic,
     WarningType,
 )
