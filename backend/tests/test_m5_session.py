@@ -270,6 +270,57 @@ def test_chat_stream_completes_followup_answer(tmp_path: Path, fake_llm_streamer
     session_service.clear_active_session()
 
 
+def test_chat_stream_ends_visible_answer_before_hidden_json_finishes(tmp_path: Path) -> None:
+    (tmp_path / "README.md").write_text("# demo\n", encoding="utf-8")
+    (tmp_path / "app.py").write_text("print('hi')\n", encoding="utf-8")
+
+    session_service.create_repo_session(str(tmp_path))
+    session_id = session_service.store.active_session.session_id
+    asyncio.run(_collect(iter_analysis_events(session_id)))
+
+    async def stream_with_slow_hidden_json(messages: list[dict[str, str]]):
+        payload = {
+            "focus": "先看入口",
+            "relation_to_overall": "入口是继续阅读主流程的起点。",
+            "next_steps": [
+                {
+                    "suggestion_id": "s1",
+                    "text": "继续看入口候选吗？",
+                    "target_goal": "entry",
+                    "related_topic_refs": [],
+                }
+            ],
+            "related_topic_refs": [],
+            "used_evidence_refs": [],
+        }
+        yield "## 本轮重点\n先看入口。\n\n## 下一步建议\n- 继续看入口候选吗？\n<json_output>"
+        await asyncio.sleep(0)
+        yield json.dumps(payload, ensure_ascii=False)
+        yield "</json_output>"
+
+    async def read_stream() -> tuple[list[RuntimeEvent], list[RuntimeEvent]]:
+        iterator = iter_chat_events(session_id)
+        early_events: list[RuntimeEvent] = []
+        while True:
+            event = await iterator.__anext__()
+            early_events.append(event)
+            if event.event_type == RuntimeEventType.ANSWER_STREAM_END:
+                break
+        remaining_events = [event async for event in iterator]
+        return early_events, remaining_events
+
+    session_service.llm_streamer = stream_with_slow_hidden_json
+    session_service.accept_chat_message(session_id, "入口在哪里？")
+
+    early_events, remaining_events = asyncio.run(read_stream())
+
+    assert early_events[-1].event_type == RuntimeEventType.ANSWER_STREAM_END
+    assert all(event.event_type != RuntimeEventType.MESSAGE_COMPLETED for event in early_events)
+    assert remaining_events[-1].event_type == RuntimeEventType.MESSAGE_COMPLETED
+
+    session_service.clear_active_session()
+
+
 def test_chat_stream_completes_consecutive_followup_answers(tmp_path: Path) -> None:
     (tmp_path / "README.md").write_text("# demo\n", encoding="utf-8")
     (tmp_path / "app.py").write_text("print('hi')\n", encoding="utf-8")

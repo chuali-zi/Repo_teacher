@@ -24,9 +24,15 @@ DEFAULT_IGNORE_PATTERNS: tuple[str, ...] = (
     "node_modules/",
     "__pycache__/",
     ".pytest_cache/",
+    "test/",
+    "tests/",
+    "__tests__/",
+    "test_*.py",
+    "*_test.py",
     "dist/",
     "build/",
 )
+
 
 def build_default_read_policy() -> ReadPolicySnapshot:
     return ReadPolicySnapshot(

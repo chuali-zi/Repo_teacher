@@ -37,6 +37,7 @@ _SYSTEM_RULES = """
 输出格式：
 - 先输出给用户看的 Markdown 正文，保持教学语言自然可读。
 - 正文结束后，另起一行输出 <json_output>...</json_output> 包裹的结构化 JSON，用于系统解析。
+- JSON 是机器侧车，不给用户看；除首轮报告外，JSON 只保留短字段和下一步建议，不要重复整段正文。
 """.strip()
 
 
@@ -330,11 +331,8 @@ def _json_schema_for_scenario(scenario: PromptScenario) -> str:
         )
     return (
         "{\n"
-        '  "focus": "...",\n'
-        '  "direct_explanation": "...",\n'
-        '  "relation_to_overall": "...",\n'
-        '  "evidence_lines": [{"text": "...", "evidence_refs": ["..."], "confidence": "high|medium|low|unknown|null"}],\n'
-        '  "uncertainties": ["..."],\n'
+        '  "focus": "用一句短语概括本轮重点，不要复述全文",\n'
+        '  "relation_to_overall": "用一句短句说明和整体的关系",\n'
         '  "next_steps": [{"suggestion_id": "...", "text": "...", "target_goal": "overview|structure|entry|flow|module|dependency|layer|summary|null", "related_topic_refs": []}],\n'
         '  "related_topic_refs": [],\n'
         '  "used_evidence_refs": ["..."]\n'

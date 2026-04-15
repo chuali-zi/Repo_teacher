@@ -479,6 +479,7 @@ class SessionService:
         raw_chunks: list[str] = []
         visible_buffer = ""
         json_output_started = False
+        answer_stream_ended = False
         json_marker = "<json_output>"
         marker_tail_size = len(json_marker) - 1
         try:
@@ -504,6 +505,13 @@ class SessionService:
                         message_id=answer_id,
                         message_chunk=visible_chunk,
                     )
+                if json_output_started and not answer_stream_ended:
+                    yield self._append_runtime_event(
+                        session,
+                        RuntimeEventType.ANSWER_STREAM_END,
+                        message_id=answer_id,
+                    )
+                    answer_stream_ended = True
         except Exception as exc:
             for event in self._fail_chat_turn(session, exc):
                 yield event
@@ -524,11 +532,12 @@ class SessionService:
                 yield event
             return
 
-        yield self._append_runtime_event(
-            session,
-            RuntimeEventType.ANSWER_STREAM_END,
-            message_id=answer_id,
-        )
+        if not answer_stream_ended:
+            yield self._append_runtime_event(
+                session,
+                RuntimeEventType.ANSWER_STREAM_END,
+                message_id=answer_id,
+            )
 
         try:
             parsed_answer = parse_answer(prompt_input, raw_text)
@@ -588,6 +597,7 @@ class SessionService:
         raw_chunks: list[str] = []
         visible_buffer = ""
         json_output_started = False
+        answer_stream_ended = False
         json_marker = "<json_output>"
         marker_tail_size = len(json_marker) - 1
 
@@ -620,6 +630,13 @@ class SessionService:
                     message_id=answer_id,
                     message_chunk=visible_chunk,
                 )
+            if json_output_started and not answer_stream_ended:
+                yield self._append_runtime_event(
+                    session,
+                    RuntimeEventType.ANSWER_STREAM_END,
+                    message_id=answer_id,
+                )
+                answer_stream_ended = True
 
         if visible_buffer and not json_output_started:
             yield self._append_runtime_event(
@@ -633,11 +650,12 @@ class SessionService:
         if not raw_text:
             raise RuntimeError("LLM returned an empty initial report")
 
-        yield self._append_runtime_event(
-            session,
-            RuntimeEventType.ANSWER_STREAM_END,
-            message_id=answer_id,
-        )
+        if not answer_stream_ended:
+            yield self._append_runtime_event(
+                session,
+                RuntimeEventType.ANSWER_STREAM_END,
+                message_id=answer_id,
+            )
 
         parsed_answer = parse_answer(prompt_input, raw_text)
         if not isinstance(parsed_answer, InitialReportAnswer):

@@ -1,5 +1,9 @@
 import type { ConfidenceLevel, MessageDto, SuggestionDto } from '../types/contracts';
-import { hasRenderableMessageText, stripStructuredPayload } from '../utils/messageText';
+import {
+  extractSuggestionHints,
+  hasRenderableMessageText,
+  stripStructuredPayload
+} from '../utils/messageText';
 import { ConfidenceTag } from './ConfidenceTag';
 import { SuggestionButtons } from './SuggestionButtons';
 
@@ -271,7 +275,7 @@ function getMessageSuggestions(message: MessageDto): SuggestionDto[] {
     return message.structured_content.next_steps;
   }
 
-  return [];
+  return extractSuggestionHints(message.raw_text);
 }
 
 function SuggestionSection({

@@ -240,6 +240,34 @@ def test_parse_final_answer_reads_structured_follow_up_payload() -> None:
     assert answer.related_topic_refs[0].target_id == "flow_1"
 
 
+def test_parse_final_answer_accepts_compact_follow_up_payload() -> None:
+    raw_text = """
+## 本轮重点
+先看入口位置。
+## 直接解释
+当前可以先从 backend/main.py 开始读。
+## 下一步建议
+- 继续看入口候选吗？
+<json_output>
+{
+  "focus": "先看入口",
+  "next_steps": [
+    {"suggestion_id": "s1", "text": "继续看入口候选吗？", "target_goal": "entry", "related_topic_refs": []}
+  ],
+  "related_topic_refs": [],
+  "used_evidence_refs": []
+}
+</json_output>
+""".strip()
+
+    answer = parse_final_answer(PromptScenario.FOLLOW_UP, raw_text)
+
+    assert answer.structured_content.focus == "先看入口"
+    assert answer.structured_content.direct_explanation == "当前可以先从 backend/main.py 开始读。"
+    assert answer.structured_content.relation_to_overall
+    assert answer.suggestions[0].text == "继续看入口候选吗？"
+
+
 def test_parse_final_answer_falls_back_to_minimum_valid_structure() -> None:
     raw_text = """
 ## 本轮重点

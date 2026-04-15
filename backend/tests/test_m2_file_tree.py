@@ -8,7 +8,9 @@ from backend.m2_file_tree.tree_scanner import scan_repository_tree
 from backend.security.safety import build_default_read_policy
 
 
-def make_repository(root_path: Path, *, max_source_files_full_analysis: int = 3000) -> RepositoryContext:
+def make_repository(
+    root_path: Path, *, max_source_files_full_analysis: int = 3000
+) -> RepositoryContext:
     read_policy = build_default_read_policy()
     read_policy.max_source_files_full_analysis = max_source_files_full_analysis
     return RepositoryContext(
@@ -26,19 +28,25 @@ def make_repository(root_path: Path, *, max_source_files_full_analysis: int = 30
 def test_scan_repository_tree_applies_sensitive_and_ignore_rules(tmp_path: Path) -> None:
     (tmp_path / "app").mkdir()
     (tmp_path / "app" / "main.py").write_text("print('hello')\n", encoding="utf-8")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "app.py").write_text("print('test entry')\n", encoding="utf-8")
     (tmp_path / ".env").write_text("SECRET=1\n", encoding="utf-8")
     (tmp_path / "node_modules").mkdir()
     (tmp_path / "node_modules" / "pkg.js").write_text("export const a = 1\n", encoding="utf-8")
     (tmp_path / ".gitignore").write_text("ignored.py\n", encoding="utf-8")
     (tmp_path / "ignored.py").write_text("print('skip')\n", encoding="utf-8")
+    (tmp_path / "test_cli.py").write_text("print('test file')\n", encoding="utf-8")
 
     snapshot = scan_repository_tree(make_repository(tmp_path))
 
     status_by_path = {node.relative_path: node.status for node in snapshot.nodes}
     assert status_by_path["app/main.py"] == FileNodeStatus.NORMAL
+    assert status_by_path["tests"] == FileNodeStatus.IGNORED
+    assert status_by_path["tests/app.py"] == FileNodeStatus.IGNORED
     assert status_by_path[".env"] == FileNodeStatus.SENSITIVE_SKIPPED
     assert status_by_path["node_modules"] == FileNodeStatus.IGNORED
     assert status_by_path["ignored.py"] == FileNodeStatus.IGNORED
+    assert status_by_path["test_cli.py"] == FileNodeStatus.IGNORED
     assert snapshot.sensitive_matches[0].relative_path == ".env"
     assert snapshot.sensitive_matches[0].content_read is False
 

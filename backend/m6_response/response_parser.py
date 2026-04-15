@@ -131,7 +131,8 @@ def _parse_structured_content(payload: dict, visible_text: str) -> StructuredMes
             or _section_map(visible_text).get("direct_explanation")
             or visible_text,
             relation_to_overall=_clean_text(payload.get("relation_to_overall"))
-            or _section_map(visible_text).get("relation_to_overall"),
+            or _section_map(visible_text).get("relation_to_overall")
+            or "这部分需要结合仓库整体结构继续确认位置和影响。",
             evidence_lines=_parse_evidence_lines(payload.get("evidence_lines"))
             or _fallback_evidence_lines(visible_text),
             uncertainties=_string_list(payload.get("uncertainties")) or _fallback_uncertainties(),

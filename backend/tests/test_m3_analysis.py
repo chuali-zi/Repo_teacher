@@ -23,7 +23,13 @@ def _write(root: Path, relative_path: str, content: str) -> Path:
     return file_path
 
 
-def _file_node(root: Path, relative_path: str, *, is_python_source: bool, status: FileNodeStatus = FileNodeStatus.NORMAL) -> FileNode:
+def _file_node(
+    root: Path,
+    relative_path: str,
+    *,
+    is_python_source: bool,
+    status: FileNodeStatus = FileNodeStatus.NORMAL,
+) -> FileNode:
     path = root / relative_path
     return FileNode(
         node_id=f"node:{relative_path}",
@@ -36,13 +42,19 @@ def _file_node(root: Path, relative_path: str, *, is_python_source: bool, status
         is_python_source=is_python_source,
         size_bytes=path.stat().st_size if path.exists() else None,
         depth=len(Path(relative_path).parts),
-        parent_path=str(Path(relative_path).parent).replace("\\", "/") if len(Path(relative_path).parts) > 1 else None,
+        parent_path=str(Path(relative_path).parent).replace("\\", "/")
+        if len(Path(relative_path).parts) > 1
+        else None,
         matched_rule_ids=[],
     )
 
 
-def _repository(root: Path, *, repo_id: str = "repo_test", max_source_files_full_analysis: int = 3000) -> RepositoryContext:
-    read_policy = build_default_read_policy().model_copy(update={"max_source_files_full_analysis": max_source_files_full_analysis})
+def _repository(
+    root: Path, *, repo_id: str = "repo_test", max_source_files_full_analysis: int = 3000
+) -> RepositoryContext:
+    read_policy = build_default_read_policy().model_copy(
+        update={"max_source_files_full_analysis": max_source_files_full_analysis}
+    )
     return RepositoryContext(
         repo_id=repo_id,
         source_type="local_path",
@@ -87,9 +99,17 @@ def test_run_static_analysis_builds_python_analysis_bundle(tmp_path: Path) -> No
         "from fastapi import FastAPI\nfrom pkg.service import run\napp = FastAPI()\n\nif __name__ == '__main__':\n    run()\n",
     )
     _write(tmp_path, "pkg/__init__.py", "")
-    _write(tmp_path, "pkg/service.py", "import os\nfrom pkg.repo import get_data\n\ndef run():\n    return get_data()\n")
+    _write(
+        tmp_path,
+        "pkg/service.py",
+        "import os\nfrom pkg.repo import get_data\n\ndef run():\n    return get_data()\n",
+    )
     _write(tmp_path, "pkg/repo.py", "def get_data():\n    return 1\n")
-    _write(tmp_path, "pyproject.toml", "[project]\nname = 'demo'\ndependencies = ['fastapi']\n[project.scripts]\ndemo = 'app:app'\n")
+    _write(
+        tmp_path,
+        "pyproject.toml",
+        "[project]\nname = 'demo'\ndependencies = ['fastapi']\n[project.scripts]\ndemo = 'app:app'\n",
+    )
     _write(tmp_path, "README.md", "python app.py\n")
 
     repo = _repository(tmp_path)
@@ -113,14 +133,51 @@ def test_run_static_analysis_builds_python_analysis_bundle(tmp_path: Path) -> No
 
     assert analysis.analysis_mode == AnalysisMode.FULL_PYTHON
     assert any(entry.target_value == "app.py" for entry in analysis.entry_candidates)
-    assert any(item.import_name == "pkg" and item.source_type == ImportSourceType.INTERNAL for item in analysis.import_classifications)
-    assert any(item.import_name == "os" and item.source_type == ImportSourceType.STDLIB for item in analysis.import_classifications)
-    assert any(item.import_name == "fastapi" and item.source_type == ImportSourceType.THIRD_PARTY for item in analysis.import_classifications)
+    assert any(
+        item.import_name == "pkg" and item.source_type == ImportSourceType.INTERNAL
+        for item in analysis.import_classifications
+    )
+    assert any(
+        item.import_name == "os" and item.source_type == ImportSourceType.STDLIB
+        for item in analysis.import_classifications
+    )
+    assert any(
+        item.import_name == "fastapi" and item.source_type == ImportSourceType.THIRD_PARTY
+        for item in analysis.import_classifications
+    )
     assert any(module.path == "pkg" for module in analysis.module_summaries)
     assert analysis.layer_view.status != "unknown"
     assert analysis.flow_summaries
     assert len(analysis.reading_path) >= 3
     assert analysis.project_profile.primary_language == "Python"
+
+
+def test_run_static_analysis_ignores_test_entry_candidates(tmp_path: Path) -> None:
+    _write(tmp_path, "app.py", "from fastapi import FastAPI\napp = FastAPI()\n")
+    _write(tmp_path, "tests/main.py", "if __name__ == '__main__':\n    raise SystemExit(0)\n")
+    _write(tmp_path, "test_runner.py", "if __name__ == '__main__':\n    raise SystemExit(0)\n")
+
+    repo = _repository(tmp_path, repo_id="repo_ignore_tests")
+    nodes = [
+        _file_node(tmp_path, "app.py", is_python_source=True),
+        _file_node(tmp_path, "tests/main.py", is_python_source=True, status=FileNodeStatus.IGNORED),
+        _file_node(
+            tmp_path, "test_runner.py", is_python_source=True, status=FileNodeStatus.IGNORED
+        ),
+    ]
+    file_tree = _file_tree(
+        tmp_path,
+        repo_id=repo.repo_id,
+        nodes=nodes,
+        primary_language="Python",
+        source_code_file_count=1,
+    )
+
+    analysis = run_static_analysis(repo, file_tree)
+
+    assert any(entry.target_value == "app.py" for entry in analysis.entry_candidates)
+    assert all(entry.target_value != "tests/main.py" for entry in analysis.entry_candidates)
+    assert all(entry.target_value != "test_runner.py" for entry in analysis.entry_candidates)
 
 
 def test_run_static_analysis_degrades_for_non_python_repository(tmp_path: Path) -> None:
@@ -174,14 +231,18 @@ def test_run_static_analysis_marks_large_repo_mode(tmp_path: Path) -> None:
     assert any(warning.type == WarningType.LARGE_REPO_LIMITED for warning in analysis.warnings)
 
 
-def test_run_static_analysis_reports_sensitive_files_without_reading_content(tmp_path: Path) -> None:
+def test_run_static_analysis_reports_sensitive_files_without_reading_content(
+    tmp_path: Path,
+) -> None:
     _write(tmp_path, "main.py", "if __name__ == '__main__':\n    pass\n")
     secret_path = _write(tmp_path, ".env", "SECRET_KEY=value\n")
 
     repo = _repository(tmp_path, repo_id="repo_sensitive")
     nodes = [
         _file_node(tmp_path, "main.py", is_python_source=True),
-        _file_node(tmp_path, ".env", is_python_source=False, status=FileNodeStatus.SENSITIVE_SKIPPED),
+        _file_node(
+            tmp_path, ".env", is_python_source=False, status=FileNodeStatus.SENSITIVE_SKIPPED
+        ),
     ]
     file_tree = _file_tree(
         tmp_path,
@@ -203,7 +264,9 @@ def test_run_static_analysis_reports_sensitive_files_without_reading_content(tmp
 
     assert any(warning.type == WarningType.SENSITIVE_FILE_SKIPPED for warning in analysis.warnings)
     assert any(item.topic == UnknownTopic.SECURITY_SKIPPED for item in analysis.unknown_items)
-    sensitive_evidence = next(item for item in analysis.evidence_catalog if item.source_path == ".env")
+    sensitive_evidence = next(
+        item for item in analysis.evidence_catalog if item.source_path == ".env"
+    )
     assert sensitive_evidence.is_sensitive_source is True
     assert sensitive_evidence.content_excerpt is None
     assert secret_path.read_text(encoding="utf-8") == "SECRET_KEY=value\n"
