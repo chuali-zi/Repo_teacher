@@ -1,5 +1,5 @@
 {
-  "api_key": "sk-05551022b9804a5a8d23f21b5022585d",
+  "api_key": "",
   "base_url": "https://api.deepseek.com",
   "model": "deepseek-chat",
   "timeout_seconds": 60

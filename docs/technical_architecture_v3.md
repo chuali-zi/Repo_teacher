@@ -11,7 +11,7 @@
 
 ---
 
-> v3 为 v2 的兼容修订版，保留 `ARCH-*` 章节锚点。v3 只修复会误导脚手架的接口路由、版本引用和运行环境裁决。
+> v3 为 v2 的兼容修订版，保留 `ARCH-*` 章节锚点。v3 修复会误导脚手架的接口路由、版本引用和运行环境裁决，并同步 M5 教学状态追踪、M6 LLM 完整集成和 prompt 教学上下文注入等已落地实现。
 
 ## 索引
 
@@ -437,10 +437,11 @@ entry_detector ──→ 入口候选集合
 
 | 子模块 | 职责 |
 |--------|------|
-| `session_store` | 维护当前会话状态（当前仓库、分析结果缓存、对话历史） |
-| `intent_classifier` | 识别用户消息意图：追问/目标切换/深浅调整/切换仓库/阶段性总结 |
+| `session_service` | 会话生命周期管理：创建、清理、分析编排（M1→M4 + M6 首轮报告）、多轮聊天编排（M5→M6） |
 | `state_machine` | 管理全局状态转换（空闲态→接入中→分析中→对话态）和对话子状态 |
-| `depth_controller` | 管理深浅级别（浅/默认/深），记录切换历史 |
+| `event_streams` | 分析 SSE 和聊天 SSE 的事件迭代器，支持断线重连快照回放 |
+| `event_mapper` | 将内部 `RuntimeEvent` 映射为前端 `SseEventDto` |
+| `teaching_state` | 教学状态持续追踪：教学计划、学生学习状态、教师工作日志、教学决策 |
 
 ### 会话状态（PRD OUT-9 明确要求保持的状态）
 
@@ -457,6 +458,25 @@ entry_detector ──→ 入口候选集合
 当前深浅级别
 对话历史（用于 LLM 上下文）
 ```
+
+### 教学状态追踪（已实现）
+
+M5 在 PRD OUT-9 基础上额外维护以下教学状态，使回答更连贯、更有教学主线：
+
+| 状态对象 | 说明 |
+|---------|------|
+| `teaching_plan_state` | 教学计划表：按 `LearningGoal` 排列的步骤序列，每步含标题、关联主题、完成状态，随对话推进自动更新 |
+| `student_learning_state` | 学生学习状态：按主题记录覆盖度（未接触/初步/部分/已覆盖）、困惑信号、关注模块 |
+| `teacher_working_log` | 教师工作日志：累计已讲解项、提出建议、已确认目标切换、待补充项，最近 3 轮滚动摘要 |
+| `current_teaching_decision` | 本轮教学决策快照：由 `teaching_state` 模块在每轮开始时生成，包含推荐动作、理由、目标主题切片 |
+| `teaching_debug_events` | 教学调试事件序列（上限 80 条），记录每轮教学状态变化，仅内部使用 |
+
+这些状态仅在后端内存和 M6 prompt 中使用，不暴露在 `GET /api/session` 的外部 DTO 中。
+
+教学状态更新时机：
+- 首轮报告完成后：初始化教学计划、标记 `overview` 步骤为已完成、记录首轮覆盖的主题
+- 每轮对话开始前：根据当前教学状态生成 `TeachingDecisionSnapshot`，决定本轮教学动作
+- 每轮对话完成后：更新教学计划进度、学生覆盖度、教师日志摘要
 
 ### 意图分类
 
@@ -512,20 +532,24 @@ entry_detector ──→ 入口候选集合
 
 | 子模块 | 职责 |
 |--------|------|
-| `prompt_builder` | 根据场景（首轮报告/追问回答/目标切换/阶段性总结）构建 LLM prompt |
-| `llm_caller` | 封装 DeepSeek API 调用，支持流式输出 |
-| `response_parser` | 解析 LLM 返回，提取结构化字段（本轮重点/直接解释/与整体关系/证据/不确定项/下一步建议） |
+| `prompt_builder` | 根据场景构建 LLM `messages` 列表（system + history + user），注入教学骨架、教学状态和输出约束 |
+| `llm_caller` | 从 `llm_config.json` 加载配置，优先使用 `openai` SDK 流式调用，SDK 不可用时回退到 `urllib` 一次性调用 |
+| `response_parser` | 解析 LLM 返回的 `<json_output>` 或 Markdown 围栏中的 JSON，提取结构化字段；解析失败时降级生成最小合格六段式 |
+| `answer_generator` | 组合 `prompt_builder` + `llm_caller` + `response_parser` 的完整回答流程 |
 | `suggestion_generator` | 基于当前讲解进度和已讲内容，生成 1-3 条下一步建议 |
 
 ### Prompt 构建策略
+
+`prompt_builder.build_messages` 负责组装 `messages` 列表，包含 system + 历史消息（最近 8 轮）+ 当前用户消息。system prompt 注入场景、深浅级别、输出约束和教学上下文。
 
 #### 首轮报告 prompt
 
 ```
 系统角色设定（教学 Agent 身份、教学规则）
-+ 教学骨架全文（M4 输出的首轮教学骨架）
++ 教学骨架全文（M4 输出的首轮教学骨架，JSON 序列化后清洗敏感内容）
 + 输出格式约束（按 OUT-1 字段顺序、候选措辞、置信度标注）
 + 深浅级别（默认）
++ JSON 输出 schema 约束（<json_output> 标签包裹）
 ```
 
 #### 多轮追问 prompt
@@ -534,9 +558,11 @@ entry_detector ──→ 入口候选集合
 系统角色设定
 + 教学骨架的主题切片（根据意图从 M4 主题索引中抽取相关部分）
 + 会话上下文（近 N 轮对话历史摘要 + 当前学习目标 + 已讲解内容列表）
++ 教学状态上下文（教学计划进度、学生覆盖度、教师日志摘要、本轮教学决策）
 + 用户当前问题
 + 输出格式约束（OUT-11 六段式结构）
 + 深浅级别
++ JSON 输出 schema 约束
 ```
 
 #### 阶段性总结 prompt
@@ -545,8 +571,18 @@ entry_detector ──→ 入口候选集合
 系统角色设定
 + 已讲解内容列表
 + 近 N 轮对话历史
++ 教学状态上下文
 + 输出格式约束（总结结构：已了解/未展开/建议下一步）
 ```
+
+#### 教学上下文注入
+
+多轮场景中，`prompt_builder` 将以下教学状态序列化为自然语言并注入 system prompt：
+- `teaching_plan`：当前教学计划的步骤和完成进度
+- `student_state`：学生在各主题的覆盖度和困惑信号
+- `teacher_log`：教师最近工作摘要
+- `teacher_memory`：累计已讲解的关键结论
+- `teaching_decision`：本轮推荐的教学动作和理由
 
 ### 流式输出
 
@@ -554,11 +590,14 @@ entry_detector ──→ 入口候选集合
 - 后端通过 SSE 逐 chunk 推送给前端
 - 前端实时渲染，无需等待完整回答
 
-### DeepSeek 接入约束
+### LLM 接入实现
 
-- `llm_caller` 通过 OpenAI 兼容客户端接入 DeepSeek，使用 `base_url=https://api.deepseek.com`
-- 第一版默认使用 `deepseek-chat` 作为教学回答模型，优先保证响应速度和成本可控
-- 模型名、`base_url`、API Key 由配置层注入，避免在业务逻辑中写死供应商参数
+- `llm_caller` 从仓库根目录 `llm_config.json` 加载配置（`api_key` 必填，`base_url`/`model`/`timeout_seconds` 可选）
+- 优先使用 `openai` SDK 的 `AsyncOpenAI` 进行流式调用（`stream=True`），逐 chunk 通过 SSE 推送给前端
+- 若 `openai` 包不可用，回退到标准库 `urllib` 对同一 OpenAI 兼容 `/chat/completions` 端点发起一次性调用，返回完整文本作为单 chunk
+- 默认 `base_url=https://api.deepseek.com`，默认 `model=deepseek-chat`
+- `api_key` 缺失或为空时，M6 调用会快速失败并返回 `llm_api_failed`
+- 模型名、`base_url`、API Key 由配置文件注入，不在业务逻辑中写死供应商参数
 
 ### 下一步建议生成
 
@@ -1028,14 +1067,16 @@ repo-tutor/
 │   │   ├── topic_indexer.py
 │   │   └── unknown_aggregator.py
 │   ├── m5_session/                # M5 对话管理器
-│   │   ├── session_store.py
-│   │   ├── intent_classifier.py
-│   │   ├── state_machine.py
-│   │   └── depth_controller.py
+│   │   ├── session_service.py     # 会话生命周期、分析编排、聊天编排
+│   │   ├── state_machine.py       # 状态转换规则、视图映射
+│   │   ├── event_streams.py       # SSE 事件迭代器、重连快照
+│   │   ├── event_mapper.py        # RuntimeEvent → SseEventDto 映射
+│   │   └── teaching_state.py      # 教学计划/学生状态/教师日志管理
 │   ├── m6_response/               # M6 回答生成器
-│   │   ├── prompt_builder.py
-│   │   ├── llm_caller.py
-│   │   ├── response_parser.py
+│   │   ├── prompt_builder.py      # 消息列表组装、教学上下文注入
+│   │   ├── llm_caller.py          # llm_config.json 加载、流式/回退调用
+│   │   ├── response_parser.py     # JSON 结构化解析、降级回退
+│   │   ├── answer_generator.py    # 完整回答流程编排
 │   │   └── suggestion_generator.py
 │   ├── security/                  # 安全策略
 │   │   └── safety.py              # 敏感文件黑名单、路径越界检查
@@ -1096,3 +1137,6 @@ repo-tutor/
 | AC-10 | 确定性结论必须有证据，不确定时使用候选措辞 | PRD EVIDENCE |
 | AC-11 | 流式输出：分析进度用 SSE 推送，LLM 回答用 SSE 流式 | ARCH-01 技术选型 |
 | AC-12 | 第一版单用户本地部署，不考虑多租户 | ARCH-01 |
+| AC-13 | M5 教学状态（教学计划/学生状态/教师日志）仅内部使用和注入 M6 prompt，不暴露在外部 DTO 中 | ARCH-07 |
+| AC-14 | `llm_caller` 优先使用 `openai` SDK 流式调用，SDK 不可用时回退到标准库一次性调用 | ARCH-08 |
+| AC-15 | `response_parser` 解析失败时降级生成最小合格六段式，不返回纯自由文本 | ARCH-08 |
