@@ -101,6 +101,8 @@ def test_build_messages_for_follow_up_includes_context_and_history() -> None:
     assert len(messages) >= 4
     assert messages[0]["role"] == "system"
     assert "Repo Tutor" in messages[0]["content"]
+    assert "tool_context" in messages[0]["content"]
+    assert "m4.get_topic_slice" in messages[0]["content"]
     assert "topic_slice" in messages[0]["content"]
     assert "backend/main.py" in messages[0]["content"]
     assert "<path_omitted>" not in messages[0]["content"]
@@ -201,6 +203,8 @@ def test_build_messages_for_initial_report_includes_teacher_memory_and_teaching_
     assert "student_learning_state" in messages[0]["content"]
     assert "teacher_working_log" in messages[0]["content"]
     assert "teaching_decision" in messages[0]["content"]
+    assert "tool_context" in messages[0]["content"]
+    assert "m4.get_initial_report_skeleton" in messages[0]["content"]
     assert "reinforce_student_gap" in messages[0]["content"]
     assert "needs_reinforcement" in messages[0]["content"]
     assert "backend/main.py" in messages[0]["content"]

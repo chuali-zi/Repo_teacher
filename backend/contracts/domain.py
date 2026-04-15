@@ -626,11 +626,38 @@ class OutputContract(ContractModel):
     must_use_candidate_wording: bool = True
 
 
+class LlmToolDefinition(ContractModel):
+    tool_name: str
+    source_module: str
+    description: str
+    input_schema: dict[str, Any] = Field(default_factory=dict)
+    output_contract: str | None = None
+    safety_notes: list[str] = Field(default_factory=list)
+    deterministic: bool = True
+
+
+class LlmToolResult(ContractModel):
+    result_id: str
+    tool_name: str
+    source_module: str
+    summary: str
+    payload: dict[str, Any] = Field(default_factory=dict)
+    reference_only: bool = True
+    generated_at: datetime | None = None
+
+
+class LlmToolContext(ContractModel):
+    policy: str
+    tools: list[LlmToolDefinition] = Field(default_factory=list)
+    tool_results: list[LlmToolResult] = Field(default_factory=list)
+
+
 class PromptBuildInput(ContractModel):
     scenario: PromptScenario
     user_message: str | None = None
     teaching_skeleton: TeachingSkeleton
     topic_slice: list[TopicRef] = Field(default_factory=list)
+    tool_context: LlmToolContext | None = None
     conversation_state: ConversationState
     history_summary: str | None = None
     depth_level: DepthLevel

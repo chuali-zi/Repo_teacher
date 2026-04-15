@@ -60,6 +60,7 @@ from backend.contracts.enums import (
     TeachingDebugEventType,
     TeachingStage,
 )
+from backend.llm_tools import build_llm_tool_context
 from backend.m1_repo_access import access_repository
 from backend.m1_repo_access.input_validator import classify_repo_input
 from backend.m2_file_tree.tree_scanner import scan_repository_tree
@@ -678,6 +679,7 @@ class SessionService:
             user_message="请先带我建立这个仓库的整体理解，并给出一条主动引导的阅读计划。",
             teaching_skeleton=session.teaching_skeleton,
             topic_slice=topic_slice,
+            tool_context=self._build_tool_context(session, topic_slice),
             conversation_state=session.conversation.model_copy(deep=True),
             history_summary=None,
             depth_level=session.conversation.depth_level,
@@ -714,10 +716,32 @@ class SessionService:
             user_message=user_text,
             teaching_skeleton=session.teaching_skeleton,
             topic_slice=topic_slice,
+            tool_context=self._build_tool_context(session, topic_slice),
             conversation_state=session.conversation.model_copy(deep=True),
             history_summary=self._history_summary(session),
             depth_level=depth,
             output_contract=self._output_contract(depth),
+        )
+
+    def _build_tool_context(
+        self,
+        session: SessionContext,
+        topic_slice: list[TopicRef],
+    ):
+        if not (
+            session.repository
+            and session.file_tree
+            and session.analysis
+            and session.teaching_skeleton
+        ):
+            raise RuntimeError("Cannot build LLM tool context before analysis completes")
+        return build_llm_tool_context(
+            repository=session.repository,
+            file_tree=session.file_tree,
+            analysis=session.analysis,
+            teaching_skeleton=session.teaching_skeleton,
+            conversation=session.conversation,
+            topic_slice=topic_slice,
         )
 
     def _last_user_message(self, session: SessionContext) -> MessageRecord:

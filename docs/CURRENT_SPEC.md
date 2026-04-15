@@ -16,6 +16,7 @@
 - 根目录 `README.md`：当前实现范围、验证状态、联调结论。
 - `docs/USAGE_GUIDE.md`：面向使用者的启动、操作流程、常见问题与排障说明。该文档是使用说明，不是接口或 DTO 裁决来源。
 - 根目录 `llm_config.json`：当前 M6 大模型调用配置文件，属于运行时配置，不属于接口或 DTO 规范文档。
+- 后端 `backend/llm_tools`：当前实现已将 M1-M4 静态分析结果包装为 LLM 只读工具上下文；该实现细节以 `technical_architecture_v3.md`、`data_structure_design_v3.md` 和 `interface_hard_spec_v3.md` 的最新章节为准。
 
 ## 版本裁决
 

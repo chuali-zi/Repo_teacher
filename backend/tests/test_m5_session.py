@@ -36,7 +36,7 @@ def fake_llm_streamer():
         prompt = _message_text(messages)
         if "当前场景: initial_report" in prompt:
             prompt_payload = _prompt_payload(messages)
-            skeleton = prompt_payload["teaching_skeleton"]
+            skeleton = _tool_payload(prompt_payload, "m4.get_initial_report_skeleton")
             payload = {
                 "initial_report_content": {
                     "overview": skeleton["overview"],
@@ -125,9 +125,16 @@ def _prompt_label(prompt: str) -> str:
 
 def _prompt_payload(messages: list[dict[str, str]]) -> dict:
     system_message = messages[0]["content"]
-    marker = "以下是当前仓库的教学参考素材（教学骨架、主题切片、会话状态和历史摘要），请基于这些素材回答："
+    marker = "以下是当前仓库的 LLM 工具目录、工具结果、教学状态和历史摘要。工具结果均为只读参考，请基于这些素材回答："
     payload_text = system_message.split(marker, 1)[1].strip()
     return json.loads(payload_text)
+
+
+def _tool_payload(prompt_payload: dict, tool_name: str) -> dict:
+    for result in prompt_payload["tool_context"]["tool_results"]:
+        if result["tool_name"] == tool_name:
+            return result["payload"]
+    raise AssertionError(f"missing tool result: {tool_name}")
 
 
 def test_analysis_stream_completes_initial_report_for_local_repo(tmp_path: Path) -> None:
@@ -242,6 +249,13 @@ def test_chat_stream_completes_followup_answer(tmp_path: Path, fake_llm_streamer
     assert any("当前场景: initial_report" in _message_text(item) for item in fake_llm_streamer)
 
     prompt_payload = _prompt_payload(fake_llm_streamer[-1])
+    assert "teaching_skeleton" not in prompt_payload
+    tool_names = {
+        result["tool_name"] for result in prompt_payload["tool_context"]["tool_results"]
+    }
+    assert "m4.get_topic_slice" in tool_names
+    assert "m3.get_entry_candidates" in tool_names
+    assert "repo.read_file_excerpt" in tool_names
     assert prompt_payload["teaching_plan"]["steps"]
     assert prompt_payload["student_learning_state"]["topics"]
     assert prompt_payload["teacher_working_log"]["current_teaching_objective"]

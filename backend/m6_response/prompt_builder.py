@@ -25,8 +25,9 @@ _SYSTEM_RULES = """
 - 教师工作日志是内部备课板，只用于决定本轮怎么教，不要把日志字段逐项暴露给用户。
 
 你的知识来源：
-- 优先基于提供的教学骨架、主题切片、会话状态和历史摘要回答。
-- 当骨架没有直接覆盖用户问题时，可以基于编程常识和当前仓库上下文合理补充，但必须标注“根据推断”或“可能”。
+- 优先查看提供的 LLM 工具目录、工具结果、教学状态和历史摘要。
+- M1-M4 静态分析结果只是工具输出和参考证据，不是回答边界，也不应压住你的教学判断。
+- 当工具结果没有直接覆盖用户问题时，可以基于编程常识、已给出的仓库上下文和代码摘录合理补充，但必须标注“根据推断”或“可能”。
 - 对入口、流程、分层、依赖等不确定结论，使用“候选”“可能”“目前证据更支持”等措辞。
 - 证据不足时明确说“目前不确定”，不要硬编运行时调用链、真实数据流或不存在的模块职责。
 
@@ -50,7 +51,7 @@ def build_messages(input_data: PromptBuildInput) -> list[dict[str, str]]:
         _scenario_guidance(input_data.scenario),
         _output_requirements(input_data),
         "JSON 结构要求:\n" + _json_schema_for_scenario(input_data.scenario),
-        "以下是当前仓库的教学参考素材（教学骨架、主题切片、会话状态和历史摘要），请基于这些素材回答：",
+        "以下是当前仓库的 LLM 工具目录、工具结果、教学状态和历史摘要。工具结果均为只读参考，请基于这些素材回答：",
         json.dumps(_build_payload(input_data), ensure_ascii=False, indent=2, sort_keys=True),
     ]
     messages.append(
@@ -94,10 +95,70 @@ def _build_payload(input_data: PromptBuildInput) -> dict[str, Any]:
         "teaching_decision": _sanitize_value(_teaching_decision(input_data)),
         "output_contract": _sanitize_value(input_data.output_contract.model_dump(mode="json")),
         "conversation_state": _sanitize_conversation(input_data),
-        "topic_slice": _sanitize_value(
+        "selected_topic_refs": _sanitize_value(
             [item.model_dump(mode="json") for item in input_data.topic_slice]
         ),
-        "teaching_skeleton": _sanitize_value(input_data.teaching_skeleton.model_dump(mode="json")),
+        "tool_context": _sanitize_value(_tool_context(input_data)),
+    }
+
+
+def _tool_context(input_data: PromptBuildInput) -> dict[str, Any]:
+    if input_data.tool_context:
+        return input_data.tool_context.model_dump(mode="json")
+    skeleton = input_data.teaching_skeleton
+    return {
+        "policy": (
+            "兼容模式：未传入正式 LLM 工具上下文，以下由 PromptBuildInput 中的"
+            "教学骨架和主题引用临时投影而来，仅作参考。"
+        ),
+        "tools": [],
+        "tool_results": [
+            {
+                "tool_name": "m4.get_initial_report_skeleton",
+                "source_module": "m4_skeleton.skeleton_assembler",
+                "summary": "教学骨架兼容投影。",
+                "reference_only": True,
+                "payload": {
+                    "overview": skeleton.overview.model_dump(mode="json"),
+                    "focus_points": [
+                        item.model_dump(mode="json") for item in skeleton.focus_points
+                    ],
+                    "repo_mapping": [
+                        item.model_dump(mode="json") for item in skeleton.repo_mapping
+                    ],
+                    "language_and_type": skeleton.language_and_type.model_dump(mode="json"),
+                    "key_directories": [
+                        item.model_dump(mode="json") for item in skeleton.key_directories
+                    ],
+                    "entry_section": skeleton.entry_section.model_dump(mode="json"),
+                    "recommended_first_step": skeleton.recommended_first_step.model_dump(
+                        mode="json"
+                    ),
+                    "reading_path_preview": [
+                        item.model_dump(mode="json")
+                        for item in skeleton.reading_path_preview
+                    ],
+                    "unknown_section": [
+                        item.model_dump(mode="json") for item in skeleton.unknown_section
+                    ],
+                    "suggested_next_questions": [
+                        item.model_dump(mode="json")
+                        for item in skeleton.suggested_next_questions
+                    ],
+                },
+            },
+            {
+                "tool_name": "m4.get_topic_slice",
+                "source_module": "m4_skeleton.topic_indexer",
+                "summary": "本轮主题引用切片。",
+                "reference_only": True,
+                "payload": {
+                    "topic_slice": [
+                        item.model_dump(mode="json") for item in input_data.topic_slice
+                    ]
+                },
+            },
+        ],
     }
 
 
@@ -131,11 +192,11 @@ def _scenario_guidance(scenario: PromptScenario) -> str:
     if scenario == PromptScenario.INITIAL_REPORT:
         return (
             "场景说明:\n"
-            "- 这是首轮报告。必须围绕教学骨架完整介绍仓库。\n"
+            "- 这是首轮报告。优先使用 m4.get_initial_report_skeleton 的工具结果建立仓库地图。\n"
             "- 你要像第一次带学生读这个仓库的老师，先帮学生建立观察框架，再给一条可执行的教学路线。\n"
             "- 用户可见 Markdown 的顺序必须贴合：概览、先抓什么、仓库映射、语言与类型、关键目录、入口候选、"
             "推荐第一步、阅读路径、不确定项、下一步建议。\n"
-            "- initial_report_content 只能复述或重组现有教学骨架，不得新增没有证据的新结论。"
+            "- initial_report_content 的确定性字段必须来自工具证据；如果用代码常识补充，只能用候选措辞放在正文或不确定项里。"
         )
     if scenario == PromptScenario.GOAL_SWITCH:
         return (
@@ -157,8 +218,8 @@ def _scenario_guidance(scenario: PromptScenario) -> str:
         )
     return (
         "场景说明:\n"
-        "- 这是多轮追问。优先使用 topic_slice 对应内容回答。\n"
-        "- 如果用户问题超出 topic_slice，可基于 teaching_skeleton 的相关字段保守补充。"
+        "- 这是多轮追问。优先查看 m4.get_topic_slice 以及相关 M1-M4 工具结果。\n"
+        "- 如果用户问题超出当前主题切片，可结合其他工具结果、文件摘录和编程常识保守补充。"
     )
 
 

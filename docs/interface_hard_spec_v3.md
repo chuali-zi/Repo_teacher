@@ -1093,10 +1093,24 @@ analysis_error -> idle
 5. M5 必须把内部 `RuntimeEvent` 映射为本文 `SseEventDto`。
 6. M5 在首轮报告完成后初始化教学状态（教学计划、学生状态、教师日志），在每轮对话前后更新。
 7. 教学状态仅注入 M6 `PromptBuildInput`，不暴露在外部 DTO 中。
+8. M5 在每次调用 M6 前必须组装 `LlmToolContext`，把 M1-M4 产物作为工具目录和工具结果传入；该步骤不得修改 M1-M4 产物。
+
+### LLM Tools `llm_tool_context`
+
+输入：M1-M4 产物 + 本轮主题切片 + 教学状态摘要
+
+输出：`LlmToolContext`
+
+硬约束：
+
+1. 只能生成只读工具目录和工具结果，不得读写完整外部 DTO。
+2. 不得包含 `root_path`、`real_path`、内部错误详情或敏感文件正文。
+3. `repo.read_file_excerpt` 和 `repo.search_text` 只能访问 `FileNodeStatus.NORMAL` 的非敏感文件。
+4. M1-M4 工具结果必须标注为 `reference_only=true`，提示 LLM 静态分析只是参考。
 
 ### M6 `answer_generator`
 
-输入：`PromptBuildInput`（包含教学骨架、教学状态上下文、输出约束）
+输入：`PromptBuildInput`（包含工具上下文、教学状态上下文、输出约束）
 
 输出：流式文本 + `StructuredAnswer | InitialReportAnswer`
 
@@ -1109,6 +1123,7 @@ analysis_error -> idle
 5. `llm_caller` 从 `llm_config.json` 加载配置，优先使用 `openai` SDK 流式调用，SDK 不可用时回退到标准库一次性调用。
 6. `response_parser` 解析失败时降级生成最小合格六段式，不返回纯自由文本。
 7. LLM 调用或解析失败时，M5 必须发出 `llm_api_failed` 或 `llm_api_timeout` 错误，不使用确定性 fallback。
+8. M6 不得把 M1-M4 工具结果当成唯一真相；当工具证据不足但需要解释时，必须使用候选和不确定措辞。
 
 ---
 
@@ -1116,12 +1131,12 @@ analysis_error -> idle
 
 ### PromptBuildInput 组装
 
-1. `scenario=initial_report`：必须携带完整 `TeachingSkeleton`，`topic_slice` 可为空。
-2. `scenario=follow_up`：`topic_slice` 必须来自 `TeachingSkeleton.topic_index` 的受控切片；教学状态上下文（教学计划进度、学生覆盖度、教师日志、本轮教学决策）一并注入。
-3. `scenario=goal_switch`：必须携带目标切换后的主题切片，并生成一条 `goal_switch_confirmation`。
+1. `scenario=initial_report`：必须携带 `tool_context`，其中至少包含 `m4.get_initial_report_skeleton`、M1/M2/M3 摘要工具结果和教学状态快照；`TeachingSkeleton` 仍保留在 `PromptBuildInput` 内部字段中供解析和兼容使用。
+2. `scenario=follow_up`：`topic_slice` 必须来自 `TeachingSkeleton.topic_index` 的受控切片；`tool_context` 必须包含 `m4.get_topic_slice` 以及相关 M1-M4 工具结果；教学状态上下文（教学计划进度、学生覆盖度、教师日志、本轮教学决策）一并注入。
+3. `scenario=goal_switch`：必须携带目标切换后的主题切片和工具上下文，并生成一条 `goal_switch_confirmation`。
 4. `scenario=depth_adjustment`：只改变 `depth_level`，不清空学习目标；最终 `MessageDto.message_type` 使用 `agent_answer`，`structured_content.focus` 明确说明讲解深度已调整，不新增 `MessageType`。
 5. `scenario=stage_summary`：重点使用 `explained_items + history_summary`。
-6. 多轮场景中，`prompt_builder` 将教学状态（`teaching_plan`、`student_state`、`teacher_log`、`teacher_memory`、`teaching_decision`）序列化为自然语言注入 system prompt。
+6. 多轮场景中，`prompt_builder` 将教学状态（`teaching_plan`、`student_state`、`teacher_log`、`teacher_memory`、`teaching_decision`）和 `tool_context` 序列化后注入 system prompt。
 
 ### OutputContract 默认值
 
@@ -1360,9 +1375,10 @@ type SuggestionButtonsProps = {
 15. 前端输入框和建议按钮禁用状态必须由 `status + sub_status` 映射得到。
 16. 前端不得自行推断入口、流程、分层、学习目标；必须消费服务端 DTO。
 17. M3 不得调用 LLM 生成分析事实；M6 不得直接读写完整 `SessionContext`。
-18. 首轮报告顺序必须是：概览、先抓什么、仓库映射、语言与类型、关键目录、入口候选、推荐第一步、阅读路径、不确定项、下一步建议。
-19. M5 教学状态（教学计划/学生状态/教师日志/教学决策/调试事件）仅注入 M6 prompt，不暴露在外部 DTO 中。
-20. M6 LLM 调用失败时必须发出 `llm_api_failed` 或 `llm_api_timeout`，不使用确定性 fallback。
+18. M1-M4 静态分析进入 M6 时必须通过 `LlmToolContext` 表达为只读工具参考，不得作为限制 LLM 作答边界的唯一材料。
+19. 首轮报告顺序必须是：概览、先抓什么、仓库映射、语言与类型、关键目录、入口候选、推荐第一步、阅读路径、不确定项、下一步建议。
+20. M5 教学状态（教学计划/学生状态/教师日志/教学决策/调试事件）仅注入 M6 prompt，不暴露在外部 DTO 中。
+21. M6 LLM 调用失败时必须发出 `llm_api_failed` 或 `llm_api_timeout`，不使用确定性 fallback。
 
 ---
 
