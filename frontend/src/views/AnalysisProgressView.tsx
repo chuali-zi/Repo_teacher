@@ -1,3 +1,4 @@
+import { MessageList } from '../components/MessageList';
 import { ProgressSteps } from '../components/ProgressSteps';
 import type { ClientSessionStore } from '../types/contracts';
 
@@ -29,7 +30,18 @@ export function AnalysisProgressView({ store, onClear }: AnalysisProgressViewPro
       ) : null}
       {timeoutNotice ? <p className="warning-text">分析时间较长，正在尝试降级分析...</p> : null}
       <ProgressSteps steps={store.progressSteps} />
+      {store.messages.length > 0 ? (
+        <MessageList
+          disabled={true}
+          messages={store.messages}
+          onPickSuggestion={ignoreSuggestionPick}
+        />
+      ) : null}
       {store.activeError ? <p className="error-text">{store.activeError.message}</p> : null}
     </main>
   );
+}
+
+async function ignoreSuggestionPick() {
+  return undefined;
 }

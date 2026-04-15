@@ -307,6 +307,30 @@ def test_parse_initial_report_uses_controlled_payload() -> None:
     assert answer.initial_report_content.recommended_first_step.target == "backend/main.py"
 
 
+def test_parse_initial_report_falls_back_when_payload_shape_is_invalid() -> None:
+    raw_text = """
+这是首轮报告正文。
+
+<json_output>
+{
+  "initial_report_content": {
+    "overview": {"summary": "缺少其他必填字段"}
+  },
+  "suggestions": []
+}
+</json_output>
+""".strip()
+
+    answer = parse_final_answer(PromptScenario.INITIAL_REPORT, raw_text)
+
+    assert answer.message_type == "initial_report"
+    assert answer.raw_text == "这是首轮报告正文。"
+    assert answer.initial_report_content.overview.summary == "这是首轮报告正文。"
+    assert (
+        answer.initial_report_content.recommended_first_step.target == "先查看 README 或主入口文件"
+    )
+
+
 def test_load_llm_config_reads_visible_json_file(tmp_path: Path) -> None:
     config_path = tmp_path / "llm_config.json"
     config_path.write_text(

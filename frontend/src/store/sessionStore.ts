@@ -5,6 +5,7 @@ import type {
   MessageDto,
   SessionSnapshotDto
 } from '../types/contracts';
+import { hasRenderableMessageText } from '../utils/messageText';
 
 export const initialClientSessionStore: ClientSessionStore = {
   sessionId: null,
@@ -134,11 +135,22 @@ export function applySseEvent(
 }
 
 function upsertMessage(messages: MessageDto[], next: MessageDto): MessageDto[] {
-  const exists = messages.some((message) => message.message_id === next.message_id);
-  if (!exists) {
+  const existing = messages.find((message) => message.message_id === next.message_id);
+  if (!existing) {
     return [...messages, next];
   }
-  return messages.map((message) => (message.message_id === next.message_id ? next : message));
+  return messages.map((message) =>
+    message.message_id === next.message_id ? mergeMessage(message, next) : message
+  );
+}
+
+function mergeMessage(current: MessageDto, next: MessageDto): MessageDto {
+  const nextHasRawText = hasRenderableMessageText(next.raw_text);
+  return {
+    ...current,
+    ...next,
+    raw_text: nextHasRawText ? next.raw_text : current.raw_text
+  };
 }
 
 function upsertById<T>(items: T[], next: T, getId: (item: T) => string): T[] {
@@ -148,4 +160,3 @@ function upsertById<T>(items: T[], next: T, getId: (item: T) => string): T[] {
   }
   return items.map((item) => (getId(item) === nextId ? next : item));
 }
-

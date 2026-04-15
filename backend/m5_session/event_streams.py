@@ -17,7 +17,7 @@ async def iter_analysis_events(session_id: str) -> AsyncIterator[AnalysisSseEven
             return
 
     if session.status in {SessionStatus.ACCESSING, SessionStatus.ANALYZING}:
-        for event in await session_service.run_initial_analysis(session_id):
+        async for event in session_service.run_initial_analysis(session_id):
             yield runtime_event_to_sse(event)
             if event.event_type in {RuntimeEventType.MESSAGE_COMPLETED, RuntimeEventType.ERROR}:
                 return

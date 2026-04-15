@@ -50,7 +50,8 @@ def parse_final_answer(
             raw_text=visible_text,
             initial_report_content=_parse_initial_report_content(payload, visible_text),
             suggestions=_parse_suggestions(
-                payload.get("suggestions") or payload.get("initial_report_content", {}).get("suggested_next_questions")
+                payload.get("suggestions")
+                or payload.get("initial_report_content", {}).get("suggested_next_questions")
             ),
             used_evidence_refs=_string_list(payload.get("used_evidence_refs")),
             warnings=_parse_warnings(payload.get("warnings")),
@@ -87,15 +88,27 @@ def _extract_payload(raw_text: str) -> tuple[str, dict]:
 def _parse_initial_report_content(payload: dict, visible_text: str) -> InitialReportContent:
     content = payload.get("initial_report_content")
     if isinstance(content, dict):
-        return InitialReportContent.model_validate(content)
+        try:
+            return InitialReportContent.model_validate(content)
+        except Exception:
+            pass
     summary = _first_non_empty_line(visible_text) or "已生成首轮报告，但结构化区块缺失。"
     return InitialReportContent(
-        overview=OverviewSection(summary=summary, confidence=ConfidenceLevel.UNKNOWN, evidence_refs=[]),
+        overview=OverviewSection(
+            summary=summary, confidence=ConfidenceLevel.UNKNOWN, evidence_refs=[]
+        ),
         focus_points=[],
         repo_mapping=[],
-        language_and_type=LanguageTypeSection(primary_language="unknown", project_types=[], degradation_notice=None),
+        language_and_type=LanguageTypeSection(
+            primary_language="unknown", project_types=[], degradation_notice=None
+        ),
         key_directories=[],
-        entry_section={"status": DerivedStatus.UNKNOWN, "entries": [], "fallback_advice": None, "unknown_items": []},
+        entry_section={
+            "status": DerivedStatus.UNKNOWN,
+            "entries": [],
+            "fallback_advice": None,
+            "unknown_items": [],
+        },
         recommended_first_step=RecommendedStep(
             target="先查看 README 或主入口文件",
             reason="结构化首轮报告缺失时，先从仓库说明和主入口建立上下文。",
@@ -111,10 +124,16 @@ def _parse_initial_report_content(payload: dict, visible_text: str) -> InitialRe
 def _parse_structured_content(payload: dict, visible_text: str) -> StructuredMessageContent:
     if payload:
         return StructuredMessageContent(
-            focus=_clean_text(payload.get("focus")) or _section_map(visible_text).get("focus") or _first_non_empty_line(visible_text),
-            direct_explanation=_clean_text(payload.get("direct_explanation")) or _section_map(visible_text).get("direct_explanation") or visible_text,
-            relation_to_overall=_clean_text(payload.get("relation_to_overall")) or _section_map(visible_text).get("relation_to_overall"),
-            evidence_lines=_parse_evidence_lines(payload.get("evidence_lines")) or _fallback_evidence_lines(visible_text),
+            focus=_clean_text(payload.get("focus"))
+            or _section_map(visible_text).get("focus")
+            or _first_non_empty_line(visible_text),
+            direct_explanation=_clean_text(payload.get("direct_explanation"))
+            or _section_map(visible_text).get("direct_explanation")
+            or visible_text,
+            relation_to_overall=_clean_text(payload.get("relation_to_overall"))
+            or _section_map(visible_text).get("relation_to_overall"),
+            evidence_lines=_parse_evidence_lines(payload.get("evidence_lines"))
+            or _fallback_evidence_lines(visible_text),
             uncertainties=_string_list(payload.get("uncertainties")) or _fallback_uncertainties(),
             next_steps=_parse_suggestions(payload.get("next_steps")),
         )
@@ -122,10 +141,12 @@ def _parse_structured_content(payload: dict, visible_text: str) -> StructuredMes
     return StructuredMessageContent(
         focus=sections.get("focus") or _first_non_empty_line(visible_text),
         direct_explanation=sections.get("direct_explanation") or visible_text,
-        relation_to_overall=sections.get("relation_to_overall") or "这部分需要结合仓库整体结构继续确认。",
+        relation_to_overall=sections.get("relation_to_overall")
+        or "这部分需要结合仓库整体结构继续确认。",
         evidence_lines=_fallback_evidence_lines(sections.get("evidence") or visible_text),
         uncertainties=_extract_bullets(sections.get("uncertainty")) or _fallback_uncertainties(),
-        next_steps=_parse_suggestions(sections.get("next_steps")) or _fallback_suggestions(visible_text),
+        next_steps=_parse_suggestions(sections.get("next_steps"))
+        or _fallback_suggestions(visible_text),
     )
 
 

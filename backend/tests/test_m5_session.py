@@ -141,6 +141,16 @@ def test_analysis_stream_completes_initial_report_for_local_repo(tmp_path: Path)
     assert submit.status == SessionStatus.ACCESSING
     assert events[0].event_type == RuntimeEventType.STATUS_CHANGED
     assert any(event.event_type == RuntimeEventType.ANALYSIS_PROGRESS for event in events)
+    event_types = [event.event_type for event in events]
+    assert event_types.index(RuntimeEventType.ANSWER_STREAM_START) < event_types.index(
+        RuntimeEventType.MESSAGE_COMPLETED
+    )
+    assert any(
+        event.event_type == RuntimeEventType.ANALYSIS_PROGRESS
+        and event.step_key == "initial_report_generation"
+        and event.step_state == "running"
+        for event in events
+    )
     assert events[-1].event_type == RuntimeEventType.MESSAGE_COMPLETED
     assert events[-1].message.message_type == MessageType.INITIAL_REPORT
     assert events[-1].message.raw_text.startswith("## 仓库概览")

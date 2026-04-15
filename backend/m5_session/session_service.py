@@ -306,16 +306,15 @@ class SessionService:
             self._cleanup_temp_resources(active.temp_resources)
         self.store.active_session = None
 
-    async def run_initial_analysis(self, session_id: str) -> list[RuntimeEvent]:
+    async def run_initial_analysis(self, session_id: str) -> AsyncIterator[RuntimeEvent]:
         session = self.assert_session_matches(session_id)
         if session.status == SessionStatus.CHATTING and self.latest_initial_report_completed_event(
             session_id
         ):
-            return []
+            return
 
-        start_index = len(session.runtime_events)
         try:
-            self._set_progress_step(
+            yield self._set_progress_step(
                 session,
                 ProgressStepKey.REPO_ACCESS,
                 ProgressStepState.RUNNING,
@@ -328,21 +327,24 @@ class SessionService:
             repository.repo_id = session.repository.repo_id
             session.repository = repository
             session.temp_resources = temp_resources
-            self._set_progress_step(
+            yield self._set_progress_step(
                 session,
                 ProgressStepKey.REPO_ACCESS,
                 ProgressStepState.DONE,
                 "仓库访问验证完成",
             )
 
+            status_start_index = len(session.runtime_events)
             self._transition_status(session, SessionStatus.ANALYZING)
+            for event in session.runtime_events[status_start_index:]:
+                yield event
 
             file_tree = scan_repository_tree(repository)
             session.file_tree = file_tree
             session.repository.primary_language = file_tree.primary_language
             session.repository.repo_size_level = file_tree.repo_size_level
             session.repository.source_code_file_count = file_tree.source_code_file_count
-            self._set_progress_step(
+            yield self._set_progress_step(
                 session,
                 ProgressStepKey.FILE_TREE_SCAN,
                 ProgressStepState.DONE,
@@ -352,7 +354,7 @@ class SessionService:
             degradation = self._maybe_create_degradation(file_tree)
             if degradation is not None:
                 session.active_degradations = [degradation]
-                self._append_runtime_event(
+                yield self._append_runtime_event(
                     session,
                     RuntimeEventType.DEGRADATION_NOTICE,
                     degradation=degradation,
@@ -360,13 +362,13 @@ class SessionService:
 
             analysis = run_static_analysis(repository, file_tree)
             session.analysis = analysis
-            self._set_progress_step(
+            yield self._set_progress_step(
                 session,
                 ProgressStepKey.ENTRY_AND_MODULE_ANALYSIS,
                 ProgressStepState.DONE,
                 "入口与模块分析完成",
             )
-            self._set_progress_step(
+            yield self._set_progress_step(
                 session,
                 ProgressStepKey.DEPENDENCY_ANALYSIS,
                 ProgressStepState.DONE,
@@ -376,33 +378,44 @@ class SessionService:
             skeleton = assemble_teaching_skeleton(analysis)
             session.teaching_skeleton = skeleton
             self._initialize_teaching_state(session)
-            self._set_progress_step(
+            yield self._set_progress_step(
                 session,
                 ProgressStepKey.SKELETON_ASSEMBLY,
                 ProgressStepState.DONE,
                 "教学骨架组装完成",
             )
 
-            initial_answer = await self._generate_initial_report_answer(session)
-            self._set_progress_step(
+            yield self._set_progress_step(
+                session,
+                ProgressStepKey.INITIAL_REPORT_GENERATION,
+                ProgressStepState.RUNNING,
+                "正在生成首轮教学报告...",
+            )
+            initial_answer: InitialReportAnswer | None = None
+            async for item in self._stream_initial_report_answer(session):
+                if isinstance(item, RuntimeEvent):
+                    yield item
+                else:
+                    initial_answer = item
+            if initial_answer is None:
+                raise RuntimeError("Initial report generation did not produce an answer")
+
+            yield self._set_progress_step(
                 session,
                 ProgressStepKey.INITIAL_REPORT_GENERATION,
                 ProgressStepState.DONE,
                 "首轮报告生成完成",
             )
+            completion_start_index = len(session.runtime_events)
             self._transition_status(
                 session,
                 SessionStatus.CHATTING,
                 ConversationSubStatus.WAITING_USER,
             )
-            self._emit_answer_events(
-                session,
-                initial_answer.answer_id,
-                initial_answer.message_type,
-                initial_answer.raw_text,
-            )
+            for event in session.runtime_events[completion_start_index:]:
+                yield event
             self._complete_initial_report(session, initial_answer)
-            return session.runtime_events[start_index:]
+            yield session.runtime_events[-1]
         except UserFacingErrorException as exc:
             error_status = (
                 SessionStatus.ACCESS_ERROR
@@ -410,13 +423,15 @@ class SessionService:
                 else SessionStatus.ANALYSIS_ERROR
             )
             session.last_error = exc.error
+            error_start_index = len(session.runtime_events)
             self._transition_status(session, error_status)
-            self._append_runtime_event(
+            for event in session.runtime_events[error_start_index:]:
+                yield event
+            yield self._append_runtime_event(
                 session,
                 RuntimeEventType.ERROR,
                 error=exc.error,
             )
-            return session.runtime_events[start_index:]
         except Exception as exc:
             error = self.analysis_failed_error(exc, stage=session.status)
             error_status = (
@@ -425,13 +440,15 @@ class SessionService:
                 else SessionStatus.ANALYSIS_ERROR
             )
             session.last_error = error
+            error_start_index = len(session.runtime_events)
             self._transition_status(session, error_status)
-            self._append_runtime_event(
+            for event in session.runtime_events[error_start_index:]:
+                yield event
+            yield self._append_runtime_event(
                 session,
                 RuntimeEventType.ERROR,
                 error=error,
             )
-            return session.runtime_events[start_index:]
 
     async def run_chat_turn(self, session_id: str) -> AsyncIterator[RuntimeEvent]:
         session = self.assert_session_matches(session_id)
@@ -562,7 +579,10 @@ class SessionService:
             payload={"message": message.model_dump(mode="python")},
         )
 
-    async def _generate_initial_report_answer(self, session: SessionContext) -> InitialReportAnswer:
+    async def _stream_initial_report_answer(
+        self,
+        session: SessionContext,
+    ) -> AsyncIterator[RuntimeEvent | InitialReportAnswer]:
         prompt_input = self._build_initial_report_prompt_input(session)
         answer_id = new_id("msg_agent_init")
         raw_chunks: list[str] = []
@@ -571,7 +591,7 @@ class SessionService:
         json_marker = "<json_output>"
         marker_tail_size = len(json_marker) - 1
 
-        self._append_runtime_event(
+        yield self._append_runtime_event(
             session,
             RuntimeEventType.ANSWER_STREAM_START,
             message_id=answer_id,
@@ -594,7 +614,7 @@ class SessionService:
             else:
                 visible_chunk = ""
             if visible_chunk:
-                self._append_runtime_event(
+                yield self._append_runtime_event(
                     session,
                     RuntimeEventType.ANSWER_STREAM_DELTA,
                     message_id=answer_id,
@@ -602,7 +622,7 @@ class SessionService:
                 )
 
         if visible_buffer and not json_output_started:
-            self._append_runtime_event(
+            yield self._append_runtime_event(
                 session,
                 RuntimeEventType.ANSWER_STREAM_DELTA,
                 message_id=answer_id,
@@ -613,7 +633,7 @@ class SessionService:
         if not raw_text:
             raise RuntimeError("LLM returned an empty initial report")
 
-        self._append_runtime_event(
+        yield self._append_runtime_event(
             session,
             RuntimeEventType.ANSWER_STREAM_END,
             message_id=answer_id,
@@ -625,7 +645,7 @@ class SessionService:
 
         answer = parsed_answer.model_copy(update={"answer_id": answer_id})
         self._ensure_initial_report_suggestions(session, answer)
-        return answer
+        yield answer
 
     def _build_initial_report_prompt_input(self, session: SessionContext) -> PromptBuildInput:
         topic_slice = self._topic_slice_for_goal(session.teaching_skeleton, LearningGoal.OVERVIEW)
@@ -1308,13 +1328,13 @@ class SessionService:
         step_key: ProgressStepKey,
         step_state: ProgressStepState,
         user_notice: str,
-    ) -> None:
+    ) -> RuntimeEvent:
         for item in session.progress_steps:
             if item.step_key == step_key:
                 item.step_state = step_state
                 break
         session.updated_at = utc_now()
-        self._append_runtime_event(
+        return self._append_runtime_event(
             session,
             RuntimeEventType.ANALYSIS_PROGRESS,
             step_key=step_key,
