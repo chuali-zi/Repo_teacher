@@ -193,6 +193,7 @@ class UserFacingErrorDto(ContractModel):
     retryable: bool
     stage: SessionStatus
     input_preserved: bool
+    internal_detail: str | None = None
 
     @classmethod
     def from_domain(cls, error: UserFacingError) -> UserFacingErrorDto:
@@ -202,6 +203,7 @@ class UserFacingErrorDto(ContractModel):
             retryable=error.retryable,
             stage=error.stage,
             input_preserved=error.input_preserved,
+            internal_detail=error.internal_detail,
         )
 
 

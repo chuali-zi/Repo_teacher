@@ -1,4 +1,5 @@
 import { ChatInput } from '../components/ChatInput';
+import { ErrorDebugPanel } from '../components/ErrorDebugPanel';
 import { MessageList } from '../components/MessageList';
 import type { ClientSessionStore } from '../types/contracts';
 
@@ -30,7 +31,7 @@ export function ChatView({ store, onSend, onClear }: ChatViewProps) {
           </ul>
         </section>
       ) : null}
-      {store.activeError ? <p className="error-text">{store.activeError.message}</p> : null}
+      {store.activeError ? <ErrorDebugPanel error={store.activeError} /> : null}
       <MessageList disabled={disabled} messages={store.messages} onPickSuggestion={onSend} />
       <ChatInput disabled={disabled} placeholder={placeholder} onSend={onSend} />
     </main>

@@ -23,6 +23,7 @@ export default function App() {
 
   return (
     <RepoInputView
+      activeError={store.currentView === 'input' ? store.activeError : null}
       inputValue={session.inputValue}
       validationMessage={validationMessage}
       submitting={session.submitting}

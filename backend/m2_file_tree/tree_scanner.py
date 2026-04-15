@@ -10,7 +10,7 @@ from backend.contracts.enums import FileNodeStatus, FileNodeType
 from backend.m2_file_tree.file_filter import apply_file_filters
 from backend.m2_file_tree.language_detector import detect_languages
 from backend.m2_file_tree.repo_sizer import classify_repo_size
-from backend.security.safety import assert_path_within_repo
+from backend.security.safety import assert_path_within_repo, match_repo_pattern
 
 SOURCE_EXTENSIONS: set[str] = {
     ".py",
@@ -56,7 +56,11 @@ SOURCE_FILENAMES: set[str] = {"Dockerfile", "Makefile"}
 
 def scan_repository_tree(repository: RepositoryContext) -> FileTreeSnapshot:
     repo_root = Path(repository.root_path).expanduser().resolve(strict=True)
-    raw_nodes = _scan_path(repo_root, repo_root)
+    raw_nodes = _scan_path(
+        repo_root,
+        repo_root,
+        ignore_patterns=tuple(repository.read_policy.ignore_patterns),
+    )
     nodes, ignored_rules, sensitive_matches = apply_file_filters(
         raw_nodes,
         ignore_patterns=repository.read_policy.ignore_patterns,
@@ -84,16 +88,27 @@ def scan_repository_tree(repository: RepositoryContext) -> FileTreeSnapshot:
     )
 
 
-def _scan_path(repo_root: Path, current_path: Path) -> list[FileNode]:
+def _scan_path(
+    repo_root: Path,
+    current_path: Path,
+    *,
+    ignore_patterns: tuple[str, ...],
+) -> list[FileNode]:
     nodes: list[FileNode] = []
-    entries = sorted(
-        current_path.iterdir(),
-        key=lambda item: (not item.is_dir(), item.name.lower(), item.name),
-    )
+    try:
+        entries = sorted(
+            current_path.iterdir(),
+            key=lambda item: (not item.is_dir(), item.name.lower(), item.name),
+        )
+    except OSError:
+        return nodes
     for entry in entries:
-        nodes.append(_build_node(repo_root, entry))
-        if entry.is_dir():
-            nodes.extend(_scan_path(repo_root, entry))
+        node = _build_node(repo_root, entry)
+        nodes.append(node)
+        if node.node_type == FileNodeType.DIRECTORY:
+            if _should_skip_descendants(node.relative_path, ignore_patterns):
+                continue
+            nodes.extend(_scan_path(repo_root, entry, ignore_patterns=ignore_patterns))
     return nodes
 
 
@@ -137,3 +152,11 @@ def _node_id(relative_path: str) -> str:
 
 def _is_source_file(filename: str, extension: str | None) -> bool:
     return filename in SOURCE_FILENAMES or (extension or "") in SOURCE_EXTENSIONS
+
+
+def _should_skip_descendants(relative_path: str, ignore_patterns: tuple[str, ...]) -> bool:
+    return any(
+        match_repo_pattern(relative_path, is_directory=True, pattern=pattern)
+        for pattern in ignore_patterns
+        if pattern.rstrip().endswith("/")
+    )

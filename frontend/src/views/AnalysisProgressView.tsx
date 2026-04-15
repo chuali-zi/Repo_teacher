@@ -1,5 +1,6 @@
 import { MessageList } from '../components/MessageList';
 import { ProgressSteps } from '../components/ProgressSteps';
+import { ErrorDebugPanel } from '../components/ErrorDebugPanel';
 import type { ClientSessionStore } from '../types/contracts';
 
 type AnalysisProgressViewProps = {
@@ -37,7 +38,7 @@ export function AnalysisProgressView({ store, onClear }: AnalysisProgressViewPro
           onPickSuggestion={ignoreSuggestionPick}
         />
       ) : null}
-      {store.activeError ? <p className="error-text">{store.activeError.message}</p> : null}
+      {store.activeError ? <ErrorDebugPanel error={store.activeError} /> : null}
     </main>
   );
 }

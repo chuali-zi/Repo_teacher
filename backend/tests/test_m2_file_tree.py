@@ -30,6 +30,8 @@ def test_scan_repository_tree_applies_sensitive_and_ignore_rules(tmp_path: Path)
     (tmp_path / "app" / "main.py").write_text("print('hello')\n", encoding="utf-8")
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests" / "app.py").write_text("print('test entry')\n", encoding="utf-8")
+    (tmp_path / ".pytest_cache").mkdir()
+    (tmp_path / ".pytest_cache" / "README.md").write_text("cached\n", encoding="utf-8")
     (tmp_path / ".env").write_text("SECRET=1\n", encoding="utf-8")
     (tmp_path / "node_modules").mkdir()
     (tmp_path / "node_modules" / "pkg.js").write_text("export const a = 1\n", encoding="utf-8")
@@ -42,9 +44,12 @@ def test_scan_repository_tree_applies_sensitive_and_ignore_rules(tmp_path: Path)
     status_by_path = {node.relative_path: node.status for node in snapshot.nodes}
     assert status_by_path["app/main.py"] == FileNodeStatus.NORMAL
     assert status_by_path["tests"] == FileNodeStatus.IGNORED
-    assert status_by_path["tests/app.py"] == FileNodeStatus.IGNORED
+    assert "tests/app.py" not in status_by_path
+    assert status_by_path[".pytest_cache"] == FileNodeStatus.IGNORED
+    assert ".pytest_cache/README.md" not in status_by_path
     assert status_by_path[".env"] == FileNodeStatus.SENSITIVE_SKIPPED
     assert status_by_path["node_modules"] == FileNodeStatus.IGNORED
+    assert "node_modules/pkg.js" not in status_by_path
     assert status_by_path["ignored.py"] == FileNodeStatus.IGNORED
     assert status_by_path["test_cli.py"] == FileNodeStatus.IGNORED
     assert snapshot.sensitive_matches[0].relative_path == ".env"

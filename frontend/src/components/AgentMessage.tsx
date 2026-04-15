@@ -5,6 +5,7 @@ import {
   stripStructuredPayload
 } from '../utils/messageText';
 import { ConfidenceTag } from './ConfidenceTag';
+import { ErrorDebugPanel } from './ErrorDebugPanel';
 import { SuggestionButtons } from './SuggestionButtons';
 
 type AgentMessageProps = {
@@ -32,7 +33,7 @@ export function AgentMessage({
           {confidence ? <ConfidenceTag confidence={confidence} /> : null}
         </header>
         <RawMarkdown text={rawText} />
-        {message.error_state ? <p className="error-text">{message.error_state.error.message}</p> : null}
+        {message.error_state ? <ErrorDebugPanel error={message.error_state.error} /> : null}
         <SuggestionSection
           disabled={disabled}
           onPick={onPickSuggestion}
@@ -229,7 +230,7 @@ export function AgentMessage({
         <span className="message-kicker">Agent 回答</span>
       </header>
       <RawMarkdown text={stripStructuredPayload(message.raw_text)} />
-      {message.error_state ? <p className="error-text">{message.error_state.error.message}</p> : null}
+      {message.error_state ? <ErrorDebugPanel error={message.error_state.error} /> : null}
       <SuggestionSection
         disabled={disabled}
         onPick={onPickSuggestion}

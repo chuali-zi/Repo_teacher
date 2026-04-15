@@ -301,6 +301,58 @@ textarea.input {
   color: #b42318;
 }
 
+.error-panel {
+  display: grid;
+  gap: 12px;
+  border: 1px solid #dc2626;
+  border-radius: 8px;
+  background: #fff7f7;
+  color: #7f1d1d;
+  padding: 14px;
+}
+
+.error-panel h2,
+.error-panel p {
+  margin: 0;
+}
+
+.debug-grid {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  margin: 0;
+}
+
+.debug-grid div {
+  display: grid;
+  gap: 2px;
+}
+
+.debug-grid dt {
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.debug-grid dd {
+  margin: 0;
+  color: #171717;
+}
+
+.debug-detail summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.debug-detail pre {
+  overflow-x: auto;
+  margin: 8px 0 0;
+  border-radius: 8px;
+  background: #171717;
+  color: #f8fafc;
+  padding: 10px;
+  white-space: pre-wrap;
+}
+
 @media (max-width: 680px) {
   .repo-form,
   .chat-input,

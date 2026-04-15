@@ -204,6 +204,7 @@ export type UserFacingErrorDto = {
   retryable: boolean;
   stage: SessionStatus;
   input_preserved: boolean;
+  internal_detail?: string | null;
 };
 
 export type MessageErrorStateDto = {

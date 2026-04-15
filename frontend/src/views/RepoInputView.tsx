@@ -1,6 +1,9 @@
+import { ErrorDebugPanel } from '../components/ErrorDebugPanel';
 import { InputField } from '../components/InputField';
+import type { UserFacingErrorDto } from '../types/contracts';
 
 export type RepoInputViewProps = {
+  activeError: UserFacingErrorDto | null;
   inputValue: string;
   validationMessage: string | null;
   submitting: boolean;
@@ -10,6 +13,7 @@ export type RepoInputViewProps = {
 };
 
 export function RepoInputView({
+  activeError,
   inputValue,
   validationMessage,
   submitting,
@@ -43,7 +47,8 @@ export function RepoInputView({
           开始
         </button>
       </div>
-      {validationMessage ? <p className="error-text">{validationMessage}</p> : null}
+      {activeError ? <ErrorDebugPanel error={activeError} /> : null}
+      {!activeError && validationMessage ? <p className="error-text">{validationMessage}</p> : null}
     </main>
   );
 }
