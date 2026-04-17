@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark" />
+    <title>Repo Tutor · 阅读间</title>
+
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght,SOFT,WONK@0,9..144,300..900,0..100,0..1;1,9..144,300..900,0..100,0..1&family=Inter+Tight:ital,wght@0,300..800;1,300..800&family=JetBrains+Mono:ital,wght@0,300..700;1,300..700&display=swap"
+    />
+
+    <link rel="stylesheet" href="./css/main.css" />
+  </head>
+  <body>
+    <div id="grain" aria-hidden="true"></div>
+
+    <main id="app" data-view="boot">
+      <aside class="sidebar" id="sidebar">
+        <div class="brand">
+          <div class="brand__mark">
+            <span class="brand__glyph">R</span>
+          </div>
+          <div class="brand__name">
+            <h1>Repo Tutor</h1>
+            <p>阅读间 · Reading Room</p>
+          </div>
+        </div>
+
+        <section class="panel" id="repo-panel" hidden>
+          <header class="panel__head">当前仓库</header>
+          <div class="panel__body" id="repo-summary"></div>
+        </section>
+
+        <section class="panel" id="progress-panel" hidden>
+          <header class="panel__head">分析进度</header>
+          <ol class="steps" id="progress-steps"></ol>
+        </section>
+
+        <section class="panel" id="degradation-panel" hidden>
+          <header class="panel__head">降级提示</header>
+          <ul class="notices" id="degradation-list"></ul>
+        </section>
+
+        <div class="sidebar__spacer"></div>
+
+        <section class="panel plugins-panel" id="plugin-slot-sidebar" data-slot="sidebar">
+          <header class="panel__head">扩展</header>
+          <div class="panel__body plugin-host" data-host="sidebar">
+            <p class="hint">尚无插件</p>
+          </div>
+        </section>
+
+        <section class="panel debug-panel" id="debug-panel">
+          <button class="debug-panel__toggle" id="debug-toggle" type="button">
+            <span class="debug-panel__dot" id="debug-dot"></span>
+            <span class="debug-panel__label">调试日志</span>
+            <span class="debug-panel__count" id="debug-count">0</span>
+            <span class="debug-panel__chev">▾</span>
+          </button>
+          <div class="debug-panel__body" id="debug-body" hidden>
+            <div class="debug-panel__toolbar">
+              <button id="debug-clear" type="button">清空</button>
+              <button id="debug-copy" type="button">复制全部</button>
+            </div>
+            <ul id="debug-list" class="debug-list"></ul>
+          </div>
+        </section>
+      </aside>
+
+      <section class="stage" id="stage">
+        <header class="stage__head" id="stage-head">
+          <div class="stage__title" id="stage-title">
+            <span class="stage__eyebrow">SESSION</span>
+            <h2>静候输入</h2>
+          </div>
+          <div class="stage__actions" id="stage-actions"></div>
+        </header>
+
+        <div class="stage__plugin" data-slot="header" data-host="header"></div>
+
+        <div class="stage__body" id="stage-body">
+          <!-- view rendered here -->
+          <div class="boot">
+            <div class="boot__pulse"></div>
+            <p>正在唤醒阅读间…</p>
+          </div>
+        </div>
+
+        <div class="stage__plugin" data-slot="thinking" data-host="thinking" hidden></div>
+
+        <footer class="stage__foot" id="stage-foot" hidden>
+          <!-- composer mounts here in chat view -->
+        </footer>
+      </section>
+    </main>
+
+    <template id="tmpl-input-view">
+      <div class="view view--input">
+        <div class="hero">
+          <p class="hero__eyebrow">REPO TUTOR · v1</p>
+          <h2 class="hero__title">
+            把陌生仓库
+            <em>读成熟悉的</em>
+            起点。
+          </h2>
+          <p class="hero__lede">
+            粘贴一个本地路径或 GitHub 公开仓库 URL。我会先观察、再勾勒骨架，
+            然后陪你逐层走进去。
+          </p>
+        </div>
+        <form class="composer composer--repo" id="repo-form" autocomplete="off">
+          <label class="composer__label" for="repo-input">仓库地址</label>
+          <div class="composer__row">
+            <input
+              id="repo-input"
+              name="repo"
+              type="text"
+              placeholder="C:\\path\\to\\repo  或  https://github.com/owner/repo"
+              spellcheck="false"
+              autocapitalize="off"
+            />
+            <button type="submit" id="repo-submit">
+              <span>开始阅读</span>
+              <span class="arrow">→</span>
+            </button>
+          </div>
+          <p class="composer__hint" id="repo-hint">
+            支持 Python 仓库完整教学；其他语言提供基础结构概览。
+          </p>
+        </form>
+        <ul class="examples" id="repo-examples">
+          <li><code>C:\Users\you\projects\demo</code></li>
+          <li><code>https://github.com/pallets/flask</code></li>
+          <li><code>https://github.com/tiangolo/fastapi</code></li>
+        </ul>
+      </div>
+    </template>
+
+    <template id="tmpl-analysis-view">
+      <div class="view view--analysis">
+        <div class="analysis-card">
+          <div class="analysis-card__head">
+            <span class="analysis-card__eyebrow">ANALYZING</span>
+            <h3 id="analysis-repo">--</h3>
+            <p id="analysis-tip">小型仓库通常 30 秒内完成。</p>
+          </div>
+          <ol class="steps steps--lg" id="analysis-steps"></ol>
+          <div class="analysis-card__notices" id="analysis-notices"></div>
+          <div class="analysis-card__stream" id="analysis-stream" hidden>
+            <header>首轮报告生成中</header>
+            <pre id="analysis-stream-text"></pre>
+          </div>
+        </div>
+      </div>
+    </template>
+
+    <template id="tmpl-chat-view">
+      <div class="view view--chat">
+        <div class="thread" id="thread"></div>
+      </div>
+    </template>
+
+    <template id="tmpl-chat-composer">
+      <form class="composer composer--chat" id="chat-form" autocomplete="off">
+        <textarea
+          id="chat-input"
+          rows="1"
+          placeholder="输入你的问题，或点击上方建议…"
+          spellcheck="false"
+        ></textarea>
+        <button id="chat-send" type="submit" aria-label="发送">
+          <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+            <path d="M3 11l18-8-7 18-3-7-8-3z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+          </svg>
+        </button>
+      </form>
+    </template>
+
+    <script type="module" src="./js/main.js"></script>
+    <script type="module" data-plugin="./plugins/thinking_dots.js"></script>
+  </body>
+</html>

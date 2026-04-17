@@ -662,6 +662,8 @@ class PromptBuildInput(ContractModel):
     history_summary: str | None = None
     depth_level: DepthLevel
     output_contract: OutputContract
+    enable_tool_calls: bool = False
+    max_tool_rounds: int = 3
 
 
 class StructuredAnswer(ContractModel):

@@ -83,10 +83,12 @@ from backend.m5_session.teaching_state import (
 )
 from backend.m6_response.answer_generator import (
     LlmStreamer,
+    ToolAwareLlmStreamer,
     parse_answer,
     stream_answer_text,
+    stream_answer_text_with_tools,
 )
-from backend.m6_response.llm_caller import stream_llm_response
+from backend.m6_response.llm_caller import stream_llm_response, stream_llm_response_with_tools
 from backend.m6_response.suggestion_generator import generate_next_step_suggestions
 from backend.security.safety import build_default_read_policy
 
@@ -145,6 +147,7 @@ class SessionService:
     def __init__(self) -> None:
         self.store = SessionStore(active_session=None)
         self.llm_streamer: LlmStreamer = stream_llm_response
+        self.tool_streamer: ToolAwareLlmStreamer = stream_llm_response_with_tools
 
     def validate_repo_input(self, input_value: str) -> ValidateRepoData:
         return classify_repo_input(input_value)
@@ -477,6 +480,17 @@ class SessionService:
             payload={"message_type": self._message_type_for_prompt(prompt_input.scenario)},
         )
 
+        use_tool_calls = prompt_input.enable_tool_calls and session.repository and session.file_tree
+        if use_tool_calls:
+            answer_stream = stream_answer_text_with_tools(
+                prompt_input,
+                repository=session.repository,
+                file_tree=session.file_tree,
+                tool_streamer=self.tool_streamer,
+            )
+        else:
+            answer_stream = stream_answer_text(prompt_input, llm_streamer=self.llm_streamer)
+
         raw_chunks: list[str] = []
         visible_buffer = ""
         json_output_started = False
@@ -484,7 +498,7 @@ class SessionService:
         json_marker = "<json_output>"
         marker_tail_size = len(json_marker) - 1
         try:
-            async for chunk in stream_answer_text(prompt_input, llm_streamer=self.llm_streamer):
+            async for chunk in answer_stream:
                 raw_chunks.append(chunk)
                 if json_output_started:
                     continue
@@ -721,6 +735,11 @@ class SessionService:
             history_summary=self._history_summary(session),
             depth_level=depth,
             output_contract=self._output_contract(depth),
+            enable_tool_calls=scenario in (
+                PromptScenario.FOLLOW_UP,
+                PromptScenario.GOAL_SWITCH,
+                PromptScenario.DEPTH_ADJUSTMENT,
+            ),
         )
 
     def _build_tool_context(

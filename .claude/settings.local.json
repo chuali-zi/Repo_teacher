@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx skills *)",
+      "Bash(python -m http.server 5180 --bind 127.0.0.1)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://127.0.0.1:5180/index.html)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://127.0.0.1:5180/js/main.js)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://127.0.0.1:5180/css/main.css)",
+      "Bash(kill %1)",
+      "Bash(echo \"server pid: $!\")",
+      "Bash(pip install *)",
+      "Bash(python -m playwright install chromium)",
+      "Bash(python *)",
+      "Bash(taskkill //F //IM python.exe)",
+      "Bash(curl -s http://127.0.0.1:8000/api/session)",
+      "Bash(curl -sI http://127.0.0.1:5180/)",
+      "Bash(curl -s http://127.0.0.1:5180/)",
+      "Bash(cmd.exe //c \"dev_web.cmd & timeout /t 3 /nobreak >nul & taskkill /F /IM python.exe >nul 2>&1\")",
+      "Bash(pushd /c/Users/chual/vibe/Irene/web)",
+      "Bash(popd)",
+      "Bash(python3 *)",
+      "Bash(powershell.exe *)"
+    ]
+  }
+}

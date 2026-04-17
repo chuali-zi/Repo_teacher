@@ -49,6 +49,7 @@ def build_messages(input_data: PromptBuildInput) -> list[dict[str, str]]:
         f"当前场景: {input_data.scenario}",
         f"讲解深度: {input_data.depth_level}",
         _scenario_guidance(input_data.scenario),
+        _tool_calling_guidance(input_data),
         _output_requirements(input_data),
         "JSON 结构要求:\n" + _json_schema_for_scenario(input_data.scenario),
         "以下是当前仓库的 LLM 工具目录、工具结果、教学状态和历史摘要。工具结果均为只读参考，请基于这些素材回答：",
@@ -220,6 +221,19 @@ def _scenario_guidance(scenario: PromptScenario) -> str:
         "场景说明:\n"
         "- 这是多轮追问。优先查看 m4.get_topic_slice 以及相关 M1-M4 工具结果。\n"
         "- 如果用户问题超出当前主题切片，可结合其他工具结果、文件摘录和编程常识保守补充。"
+    )
+
+
+def _tool_calling_guidance(input_data: PromptBuildInput) -> str:
+    if not input_data.enable_tool_calls:
+        return ""
+    return (
+        "工具调用说明:\n"
+        "- 本轮你可以调用 read_file_excerpt 和 search_text 两个工具按需查看仓库源码。\n"
+        "- 仅在已有工具结果不足以回答用户问题时才调用工具，不要为了调用而调用。\n"
+        "- 调用工具后，用工具返回的实际内容来支撑你的讲解，不要编造代码细节。\n"
+        "- 每轮最多调用 2-3 次工具，优先查看用户追问最直接相关的文件。\n"
+        "- 工具结果中的 [redacted_secret] 是脱敏标记，不要对其内容进行猜测。"
     )
 
 

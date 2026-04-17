@@ -21,15 +21,45 @@ from backend.contracts.enums import (
     TeachingDecisionAction,
     TeachingPlanStepStatus,
 )
+from backend.m5_session.session_service import SessionService
+from backend.m6_response.llm_caller import StreamResult
 from backend.m5_session import session_service
 from backend.m5_session.event_mapper import runtime_event_to_sse
 from backend.m5_session.event_streams import iter_analysis_events, iter_chat_events
+
+
+def _fake_answer_text(label: str) -> str:
+    payload = {
+        "focus": f"LLM focus: {label}",
+        "direct_explanation": f"LLM direct answer for {label}.",
+        "relation_to_overall": "This answer is generated from the M6 prompt context.",
+        "evidence_lines": [
+            {
+                "text": "M6 received the controlled teaching skeleton and topic slice.",
+                "evidence_refs": [],
+                "confidence": "medium",
+            }
+        ],
+        "uncertainties": ["当前没有额外不确定项。"],
+        "next_steps": [
+            {
+                "suggestion_id": "s_next",
+                "text": "继续看入口候选。",
+                "target_goal": "entry",
+                "related_topic_refs": [],
+            }
+        ],
+        "related_topic_refs": [],
+        "used_evidence_refs": [],
+    }
+    return f"## 本轮重点\nLLM answer for {label}.\n<json_output>{json.dumps(payload)}</json_output>"
 
 
 @pytest.fixture(autouse=True)
 def fake_llm_streamer():
     captured: list[list[dict[str, str]]] = []
     previous_streamer = session_service.llm_streamer
+    previous_tool_streamer = session_service.tool_streamer
 
     async def stream(messages: list[dict[str, str]]):
         captured.append(messages)
@@ -67,40 +97,24 @@ def fake_llm_streamer():
             yield text[midpoint:]
             return
         label = _prompt_label(_message_text(messages))
-        payload = {
-            "focus": f"LLM focus: {label}",
-            "direct_explanation": f"LLM direct answer for {label}.",
-            "relation_to_overall": "This answer is generated from the M6 prompt context.",
-            "evidence_lines": [
-                {
-                    "text": "M6 received the controlled teaching skeleton and topic slice.",
-                    "evidence_refs": [],
-                    "confidence": "medium",
-                }
-            ],
-            "uncertainties": ["当前没有额外不确定项。"],
-            "next_steps": [
-                {
-                    "suggestion_id": "s_next",
-                    "text": "继续看入口候选。",
-                    "target_goal": "entry",
-                    "related_topic_refs": [],
-                }
-            ],
-            "related_topic_refs": [],
-            "used_evidence_refs": [],
-        }
-        text = (
-            f"## 本轮重点\nLLM answer for {label}."
-            f"\n<json_output>{json.dumps(payload)}</json_output>"
-        )
+        text = _fake_answer_text(label)
         midpoint = len(text) // 2
         yield text[:midpoint]
         yield text[midpoint:]
 
+    async def tool_stream(messages, *, tools=None, on_content_delta=None, temperature=0.6):
+        captured.append(messages)
+        label = _prompt_label(_message_text(messages))
+        text = _fake_answer_text(label)
+        if on_content_delta is not None:
+            await on_content_delta(text)
+        return StreamResult(content_chunks=[text], finish_reason="stop")
+
     session_service.llm_streamer = stream
+    session_service.tool_streamer = tool_stream
     yield captured
     session_service.llm_streamer = previous_streamer
+    session_service.tool_streamer = previous_tool_streamer
     session_service.clear_active_session()
 
 
@@ -250,9 +264,7 @@ def test_chat_stream_completes_followup_answer(tmp_path: Path, fake_llm_streamer
 
     prompt_payload = _prompt_payload(fake_llm_streamer[-1])
     assert "teaching_skeleton" not in prompt_payload
-    tool_names = {
-        result["tool_name"] for result in prompt_payload["tool_context"]["tool_results"]
-    }
+    tool_names = {result["tool_name"] for result in prompt_payload["tool_context"]["tool_results"]}
     assert "m4.get_topic_slice" in tool_names
     assert "m3.get_entry_candidates" in tool_names
     assert "repo.read_file_excerpt" in tool_names
@@ -292,25 +304,31 @@ def test_chat_stream_ends_visible_answer_before_hidden_json_finishes(tmp_path: P
     session_id = session_service.store.active_session.session_id
     asyncio.run(_collect(iter_analysis_events(session_id)))
 
-    async def stream_with_slow_hidden_json(messages: list[dict[str, str]]):
-        payload = {
-            "focus": "先看入口",
-            "relation_to_overall": "入口是继续阅读主流程的起点。",
-            "next_steps": [
-                {
-                    "suggestion_id": "s1",
-                    "text": "继续看入口候选吗？",
-                    "target_goal": "entry",
-                    "related_topic_refs": [],
-                }
-            ],
-            "related_topic_refs": [],
-            "used_evidence_refs": [],
-        }
-        yield "## 本轮重点\n先看入口。\n\n## 下一步建议\n- 继续看入口候选吗？\n<json_output>"
-        await asyncio.sleep(0)
-        yield json.dumps(payload, ensure_ascii=False)
-        yield "</json_output>"
+    payload = {
+        "focus": "先看入口",
+        "relation_to_overall": "入口是继续阅读主流程的起点。",
+        "next_steps": [
+            {
+                "suggestion_id": "s1",
+                "text": "继续看入口候选吗？",
+                "target_goal": "entry",
+                "related_topic_refs": [],
+            }
+        ],
+        "related_topic_refs": [],
+        "used_evidence_refs": [],
+    }
+
+    async def tool_stream_slow_json(
+        messages, *, tools=None, on_content_delta=None, temperature=0.6
+    ):
+        part1 = "## 本轮重点\n先看入口。\n\n## 下一步建议\n- 继续看入口候选吗？\n<json_output>"
+        part2 = json.dumps(payload, ensure_ascii=False) + "</json_output>"
+        chunks = [part1, part2]
+        if on_content_delta is not None:
+            for chunk in chunks:
+                await on_content_delta(chunk)
+        return StreamResult(content_chunks=chunks, finish_reason="stop")
 
     async def read_stream() -> tuple[list[RuntimeEvent], list[RuntimeEvent]]:
         iterator = iter_chat_events(session_id)
@@ -323,7 +341,7 @@ def test_chat_stream_ends_visible_answer_before_hidden_json_finishes(tmp_path: P
         remaining_events = [event async for event in iterator]
         return early_events, remaining_events
 
-    session_service.llm_streamer = stream_with_slow_hidden_json
+    session_service.tool_streamer = tool_stream_slow_json
     session_service.accept_chat_message(session_id, "入口在哪里？")
 
     early_events, remaining_events = asyncio.run(read_stream())
@@ -362,10 +380,89 @@ def test_chat_stream_completes_consecutive_followup_answers(tmp_path: Path) -> N
     session_service.clear_active_session()
 
 
+def test_direct_session_service_flow_supports_followup_after_initial_report(tmp_path: Path) -> None:
+    (tmp_path / "README.md").write_text("# demo\n", encoding="utf-8")
+    (tmp_path / "app.py").write_text("print('hi')\n", encoding="utf-8")
+
+    svc = SessionService()
+
+    async def fake_streamer(messages: list[dict[str, str]]):
+        prompt = _message_text(messages)
+        if "当前场景: initial_report" in prompt:
+            prompt_payload = _prompt_payload(messages)
+            skeleton = _tool_payload(prompt_payload, "m4.get_initial_report_skeleton")
+            payload = {
+                "initial_report_content": {
+                    "overview": skeleton["overview"],
+                    "focus_points": skeleton["focus_points"],
+                    "repo_mapping": skeleton["repo_mapping"],
+                    "language_and_type": skeleton["language_and_type"],
+                    "key_directories": skeleton["key_directories"],
+                    "entry_section": skeleton["entry_section"],
+                    "recommended_first_step": skeleton["recommended_first_step"],
+                    "reading_path_preview": skeleton["reading_path_preview"],
+                    "unknown_section": skeleton["unknown_section"],
+                    "suggested_next_questions": skeleton["suggested_next_questions"],
+                },
+                "suggestions": skeleton["suggested_next_questions"],
+                "used_evidence_refs": [],
+            }
+            text = (
+                "## 仓库概览\n"
+                "这是首轮报告。\n"
+                f"\n<json_output>{json.dumps(payload, ensure_ascii=False)}</json_output>"
+            )
+        else:
+            text = _fake_answer_text("direct service follow-up")
+        midpoint = len(text) // 2
+        yield text[:midpoint]
+        yield text[midpoint:]
+
+    async def fake_tool_streamer(
+        messages,
+        *,
+        tools=None,
+        on_content_delta=None,
+        temperature=0.6,
+    ):
+        text = _fake_answer_text("direct service follow-up")
+        if on_content_delta is not None:
+            await on_content_delta(text)
+        return StreamResult(content_chunks=[text], finish_reason="stop")
+
+    svc.llm_streamer = fake_streamer
+    svc.tool_streamer = fake_tool_streamer
+
+    svc.create_repo_session(str(tmp_path))
+    session_id = svc.store.active_session.session_id
+
+    analysis_events = asyncio.run(_collect(svc.run_initial_analysis(session_id)))
+    assert analysis_events[-1].event_type == RuntimeEventType.MESSAGE_COMPLETED
+    assert svc.get_snapshot(session_id).sub_status == ConversationSubStatus.WAITING_USER
+
+    svc.accept_chat_message(session_id, "首轮之后还能继续问吗？")
+    chat_events = asyncio.run(_collect(svc.run_chat_turn(session_id)))
+
+    assert chat_events[0].event_type == RuntimeEventType.STATUS_CHANGED
+    assert any(event.event_type == RuntimeEventType.ANSWER_STREAM_START for event in chat_events)
+    assert chat_events[-1].event_type == RuntimeEventType.MESSAGE_COMPLETED
+
+    snapshot = svc.get_snapshot(session_id)
+    assert snapshot.status == SessionStatus.CHATTING
+    assert snapshot.sub_status == ConversationSubStatus.WAITING_USER
+    assert snapshot.messages[-2].role == MessageRole.USER
+    assert snapshot.messages[-1].message_type == MessageType.AGENT_ANSWER
+
+
 def test_chat_stream_reports_llm_failure_without_fallback_answer(tmp_path: Path) -> None:
     async def failing_streamer(messages: list[dict[str, str]]):
         raise RuntimeError("provider unavailable")
         yield ""
+
+    async def failing_tool_streamer(
+        messages, *, tools=None, on_content_delta=None, temperature=0.6
+    ):
+        raise RuntimeError("provider unavailable")
 
     (tmp_path / "README.md").write_text("# demo\n", encoding="utf-8")
     (tmp_path / "app.py").write_text("print('hi')\n", encoding="utf-8")
@@ -375,6 +472,7 @@ def test_chat_stream_reports_llm_failure_without_fallback_answer(tmp_path: Path)
     asyncio.run(_collect(iter_analysis_events(session_id)))
 
     session_service.llm_streamer = failing_streamer
+    session_service.tool_streamer = failing_tool_streamer
     session_service.accept_chat_message(session_id, "first question")
     events = asyncio.run(_collect(iter_chat_events(session_id)))
 
