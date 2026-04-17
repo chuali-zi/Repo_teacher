@@ -492,6 +492,7 @@ class SessionService:
             answer_stream = stream_answer_text(prompt_input, llm_streamer=self.llm_streamer)
 
         raw_chunks: list[str] = []
+        visible_chunks: list[str] = []
         visible_buffer = ""
         json_output_started = False
         answer_stream_ended = False
@@ -514,6 +515,7 @@ class SessionService:
                 else:
                     visible_chunk = ""
                 if visible_chunk:
+                    visible_chunks.append(visible_chunk)
                     yield self._append_runtime_event(
                         session,
                         RuntimeEventType.ANSWER_STREAM_DELTA,
@@ -533,6 +535,7 @@ class SessionService:
             return
 
         if visible_buffer and not json_output_started:
+            visible_chunks.append(visible_buffer)
             yield self._append_runtime_event(
                 session,
                 RuntimeEventType.ANSWER_STREAM_DELTA,
@@ -565,12 +568,13 @@ class SessionService:
                 yield event
             return
 
+        visible_text = "".join(visible_chunks)
         message = MessageRecord(
             message_id=answer.answer_id,
             role=MessageRole.AGENT,
             message_type=answer.message_type,
             created_at=utc_now(),
-            raw_text=answer.raw_text,
+            raw_text=visible_text,
             structured_content=answer.structured_content,
             related_goal=session.conversation.current_learning_goal,
             suggestions=answer.suggestions,
@@ -610,6 +614,7 @@ class SessionService:
         prompt_input = self._build_initial_report_prompt_input(session)
         answer_id = new_id("msg_agent_init")
         raw_chunks: list[str] = []
+        visible_chunks: list[str] = []
         visible_buffer = ""
         json_output_started = False
         answer_stream_ended = False
@@ -639,6 +644,7 @@ class SessionService:
             else:
                 visible_chunk = ""
             if visible_chunk:
+                visible_chunks.append(visible_chunk)
                 yield self._append_runtime_event(
                     session,
                     RuntimeEventType.ANSWER_STREAM_DELTA,
@@ -654,6 +660,7 @@ class SessionService:
                 answer_stream_ended = True
 
         if visible_buffer and not json_output_started:
+            visible_chunks.append(visible_buffer)
             yield self._append_runtime_event(
                 session,
                 RuntimeEventType.ANSWER_STREAM_DELTA,
@@ -676,7 +683,10 @@ class SessionService:
         if not isinstance(parsed_answer, InitialReportAnswer):
             raise RuntimeError("M6 returned a non-initial-report answer for initial analysis")
 
-        answer = parsed_answer.model_copy(update={"answer_id": answer_id})
+        visible_text = "".join(visible_chunks)
+        answer = parsed_answer.model_copy(
+            update={"answer_id": answer_id, "raw_text": visible_text}
+        )
         self._ensure_initial_report_suggestions(session, answer)
         yield answer
 

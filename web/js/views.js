@@ -150,8 +150,7 @@ function handleSseEvent(kind, evt) {
       const node = document.querySelector(`[data-stream-id="${evt.message_id}"]`);
       if (node) {
         node.textContent += evt.delta_text || "";
-        const stage = $("#stage-body");
-        if (stage) stage.scrollTop = stage.scrollHeight;
+        scrollStageToBottom();
       } else {
         // fallback: still update in-state so a later render shows it
         setState((s) => ({
@@ -182,6 +181,7 @@ function handleSseEvent(kind, evt) {
         chatStreamCloser();
         chatStreamCloser = null;
       }
+      scrollStageToBottom();
       break;
 
     case "error":
@@ -550,12 +550,7 @@ function updateThread(state) {
     existingThinking.remove();
   }
 
-  // Auto-scroll if user is near the bottom
-  const stage = document.getElementById("stage-body");
-  if (stage) {
-    const nearBottom = stage.scrollHeight - stage.scrollTop - stage.clientHeight < 240;
-    if (nearBottom) stage.scrollTop = stage.scrollHeight;
-  }
+  scrollStageToBottom();
 }
 
 function renderThinking() {
@@ -579,16 +574,19 @@ function renderMessage(msg) {
   } else if (msg._streaming || (!msg.streaming_complete && !msg.structured_content && !msg.initial_report_content)) {
     // streaming: just show the live text, will be replaced when message_completed arrives
     wrap.appendChild(el("pre", { class: "bubble bubble--stream", dataset: { streamId: msg.message_id } }, msg.raw_text || ""));
-  } else if (msg.message_type === "initial_report" && msg.initial_report_content) {
+  } else if (msg.message_type === "initial_report" && msg.initial_report_content && !shouldPreferRawInitialReport(msg)) {
     wrap.appendChild(renderInitialReport(msg));
-  } else if (msg.structured_content) {
+  } else if (msg.structured_content && !shouldPreferRawAnswer(msg)) {
     wrap.appendChild(renderStructuredAnswer(msg));
   } else {
-    // final fallback — show raw text
-    wrap.appendChild(el("div", { class: "bubble" }, msg.raw_text || "(无内容)"));
+    wrap.appendChild(renderRawMessage(msg));
   }
   bus.emit("message:render", { msg, root: wrap });
   return wrap;
+}
+
+function renderRawMessage(msg) {
+  return el("div", { class: "bubble bubble--raw" }, renderMarkdown(msg.raw_text || "(无内容)"));
 }
 
 function renderMessageHead(msg) {
@@ -657,6 +655,137 @@ function renderStructuredAnswer(msg) {
   }
   wrap.appendChild(inner);
   return wrap;
+}
+
+function shouldPreferRawInitialReport(msg) {
+  const c = msg.initial_report_content;
+  if (!c) return true;
+  const hasRichStructure = Boolean(
+    c.focus_points?.length
+    || c.repo_mapping?.length
+    || c.key_directories?.length
+    || c.entry_section?.entries?.length
+    || c.reading_path_preview?.length
+    || c.unknown_section?.length
+  );
+  const usesFallbackStep = c.recommended_first_step?.target === "先查看 README 或主入口文件";
+  return !hasRichStructure && !!msg.raw_text && usesFallbackStep;
+}
+
+function shouldPreferRawAnswer(msg) {
+  const sc = msg.structured_content;
+  if (!sc || !msg.raw_text) return true;
+  const hasExplicitSections = /(^|\n)#{1,6}\s*(本轮重点|直接解释|与整体的关系|证据|不确定项|下一步建议)\s*\n/.test(msg.raw_text);
+  const fallbackRelation = (sc.relation_to_overall || "").includes("需要结合仓库整体结构继续确认");
+  const fallbackEvidence = Array.isArray(sc.evidence_lines)
+    && sc.evidence_lines.length === 1
+    && (sc.evidence_lines[0]?.confidence || "") === "unknown"
+    && !(sc.evidence_lines[0]?.evidence_refs || []).length;
+  return !hasExplicitSections && fallbackRelation && fallbackEvidence;
+}
+
+function renderMarkdown(text) {
+  return el("div", { class: "markdown", html: markdownToHtml(text) });
+}
+
+function markdownToHtml(text) {
+  const lines = String(text || "").replace(/\r/g, "").split("\n");
+  const html = [];
+  let paragraph = [];
+  let listType = null;
+  let listItems = [];
+  let inCode = false;
+  let codeLines = [];
+
+  const flushParagraph = () => {
+    if (!paragraph.length) return;
+    html.push(`<p>${paragraph.map((line) => formatInlineMarkdown(line)).join("<br>")}</p>`);
+    paragraph = [];
+  };
+  const flushList = () => {
+    if (!listType || !listItems.length) return;
+    html.push(`<${listType}>${listItems.map((item) => `<li>${formatInlineMarkdown(item)}</li>`).join("")}</${listType}>`);
+    listType = null;
+    listItems = [];
+  };
+  const flushCode = () => {
+    if (!codeLines.length) return;
+    html.push(`<pre><code>${escapeHtml(codeLines.join("\n"))}</code></pre>`);
+    codeLines = [];
+  };
+
+  for (const line of lines) {
+    const fence = line.match(/^```/);
+    if (fence) {
+      flushParagraph();
+      flushList();
+      if (inCode) {
+        flushCode();
+        inCode = false;
+      } else {
+        inCode = true;
+      }
+      continue;
+    }
+    if (inCode) {
+      codeLines.push(line);
+      continue;
+    }
+    if (!line.trim()) {
+      flushParagraph();
+      flushList();
+      continue;
+    }
+    const heading = line.match(/^(#{1,3})\s+(.*)$/);
+    if (heading) {
+      flushParagraph();
+      flushList();
+      const level = Math.min(heading[1].length + 2, 6);
+      html.push(`<h${level}>${formatInlineMarkdown(heading[2])}</h${level}>`);
+      continue;
+    }
+    const ordered = line.match(/^\s*\d+\.\s+(.*)$/);
+    const unordered = line.match(/^\s*[-*]\s+(.*)$/);
+    if (ordered || unordered) {
+      flushParagraph();
+      const nextType = ordered ? "ol" : "ul";
+      if (listType && listType !== nextType) flushList();
+      listType = nextType;
+      listItems.push((ordered || unordered)[1]);
+      continue;
+    }
+    paragraph.push(line);
+  }
+
+  flushParagraph();
+  flushList();
+  if (inCode) flushCode();
+  return html.join("");
+}
+
+function formatInlineMarkdown(text) {
+  let html = escapeHtml(text);
+  html = html.replace(/`([^`]+)`/g, "<code>$1</code>");
+  html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  html = html.replace(/\*([^*]+)\*/g, "<em>$1</em>");
+  return html;
+}
+
+function escapeHtml(text) {
+  return String(text)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function scrollStageToBottom() {
+  const stage = document.getElementById("stage-body");
+  if (!stage) return;
+  requestAnimationFrame(() => {
+    stage.scrollTop = stage.scrollHeight;
+  });
 }
 
 function renderSection(label, body) {

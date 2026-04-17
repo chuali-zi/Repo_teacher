@@ -357,10 +357,47 @@ def test_parse_initial_report_falls_back_when_payload_shape_is_invalid() -> None
 
     assert answer.message_type == "initial_report"
     assert answer.raw_text == "这是首轮报告正文。"
-    assert answer.initial_report_content.overview.summary == "这是首轮报告正文。"
+    assert answer.initial_report_content.overview.summary == "缺少其他必填字段"
     assert (
         answer.initial_report_content.recommended_first_step.target == "先查看 README 或主入口文件"
     )
+
+
+def test_parse_initial_report_strips_invalid_json_sidecar_from_raw_text() -> None:
+    raw_text = """
+这是正文。
+
+<json_output>
+{"initial_report_content": { invalid json }
+</json_output>
+""".strip()
+
+    answer = parse_final_answer(PromptScenario.INITIAL_REPORT, raw_text)
+
+    assert answer.raw_text == "这是正文。"
+
+
+def test_parse_initial_report_salvages_partial_sidecar_content() -> None:
+    raw_text = """
+这是首轮报告正文。
+
+<json_output>
+{
+  "initial_report_content": {
+    "overview": {"summary": "这是保留下来的概览", "confidence": "medium"},
+    "recommended_first_step": {"target": "backend/main.py", "reason": "先看入口", "learning_gain": "先建立主流程认知"},
+    "suggested_next_questions": ["想继续看入口吗？"]
+  }
+}
+</json_output>
+""".strip()
+
+    answer = parse_final_answer(PromptScenario.INITIAL_REPORT, raw_text)
+
+    assert answer.raw_text == "这是首轮报告正文。"
+    assert answer.initial_report_content.overview.summary == "这是保留下来的概览"
+    assert answer.initial_report_content.recommended_first_step.target == "backend/main.py"
+    assert answer.initial_report_content.suggested_next_questions[0].text == "想继续看入口吗？"
 
 
 def test_load_llm_config_reads_visible_json_file(tmp_path: Path) -> None:

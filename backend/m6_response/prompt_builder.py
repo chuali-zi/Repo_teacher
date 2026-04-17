@@ -36,9 +36,12 @@ _SYSTEM_RULES = """
 - 不得输出内部错误堆栈。
 
 输出格式：
-- 先输出给用户看的 Markdown 正文，保持教学语言自然可读。
-- 正文结束后，另起一行输出 <json_output>...</json_output> 包裹的结构化 JSON，用于系统解析。
-- JSON 是机器侧车，不给用户看；除首轮报告外，JSON 只保留短字段和下一步建议，不要重复整段正文。
+- 正文全部用 Markdown，像老师讲课一样连贯自然；不需要机械使用固定小标题。
+- 正文是第一优先级，必须自洽、完整、可直接给用户阅读；即使 JSON 侧车不完整，正文也必须保留核心教学内容。
+- 正文结束后，另起一行输出 <json_output>{...}</json_output> 包裹的 JSON，作为机器侧车；它用于增强渲染，但不是正文的替代品。
+- 首轮报告场景下，JSON 侧车应优先包含完整的 initial_report_content 和 1-3 条 suggestions；如果个别字段拿不准，可以留空，但不要省略整块结构。
+- 多轮对话场景下，JSON 侧车至少包含 next_steps；若无法稳定产出完整结构，也不要为了凑 JSON 牺牲正文质量。
+- JSON 是机器侧车，不给用户看；不要在 JSON 里重复整段正文，也不要输出无关调试信息。
 """.strip()
 
 
@@ -136,15 +139,13 @@ def _tool_context(input_data: PromptBuildInput) -> dict[str, Any]:
                         mode="json"
                     ),
                     "reading_path_preview": [
-                        item.model_dump(mode="json")
-                        for item in skeleton.reading_path_preview
+                        item.model_dump(mode="json") for item in skeleton.reading_path_preview
                     ],
                     "unknown_section": [
                         item.model_dump(mode="json") for item in skeleton.unknown_section
                     ],
                     "suggested_next_questions": [
-                        item.model_dump(mode="json")
-                        for item in skeleton.suggested_next_questions
+                        item.model_dump(mode="json") for item in skeleton.suggested_next_questions
                     ],
                 },
             },
@@ -154,9 +155,7 @@ def _tool_context(input_data: PromptBuildInput) -> dict[str, Any]:
                 "summary": "本轮主题引用切片。",
                 "reference_only": True,
                 "payload": {
-                    "topic_slice": [
-                        item.model_dump(mode="json") for item in input_data.topic_slice
-                    ]
+                    "topic_slice": [item.model_dump(mode="json") for item in input_data.topic_slice]
                 },
             },
         ],
@@ -389,27 +388,30 @@ def _json_schema_for_scenario(scenario: PromptScenario) -> str:
         return (
             "{\n"
             '  "initial_report_content": {\n'
-            '    "overview": {"summary": "...", "confidence": "high|medium|low|unknown", "evidence_refs": ["..."]},\n'
-            '    "focus_points": [{"focus_id": "...", "topic": "overview|structure|entry|flow|module|dependency|layer|summary", "title": "...", "reason": "...", "related_refs": []}],\n'
-            '    "repo_mapping": [{"concept": "...", "mapped_paths": ["..."], "mapped_module_ids": ["..."], "explanation": "...", "confidence": "high|medium|low|unknown", "evidence_refs": ["..."]}],\n'
-            '    "language_and_type": {"primary_language": "...", "project_types": [], "degradation_notice": null},\n'
-            '    "key_directories": [{"path": "...", "role": "...", "main_path_role": "main_path|supporting|unknown", "confidence": "high|medium|low|unknown", "evidence_refs": ["..."]}],\n'
-            '    "entry_section": {"status": "formed|heuristic|unknown", "entries": [], "fallback_advice": null, "unknown_items": []},\n'
-            '    "recommended_first_step": {"target": "...", "reason": "...", "learning_gain": "...", "evidence_refs": ["..."]},\n'
+            '    "overview": {"summary": "一句话概览", "confidence": "high|medium|low|unknown", "evidence_refs": []},\n'
+            '    "focus_points": [],\n'
+            '    "repo_mapping": [],\n'
+            '    "language_and_type": {"primary_language": "Python", "project_types": [], "degradation_notice": null},\n'
+            '    "key_directories": [],\n'
+            '    "entry_section": {"status": "confirmed|heuristic|unknown", "entries": [], "fallback_advice": null},\n'
+            '    "recommended_first_step": {"target": "先看哪里", "reason": "为什么", "learning_gain": "学到什么", "evidence_refs": []},\n'
             '    "reading_path_preview": [],\n'
             '    "unknown_section": [],\n'
-            '    "suggested_next_questions": [{"suggestion_id": "...", "text": "...", "target_goal": "overview|structure|entry|flow|module|dependency|layer|summary|null", "related_topic_refs": []}]\n'
+            '    "suggested_next_questions": []\n'
             "  },\n"
-            '  "suggestions": [{"suggestion_id": "...", "text": "...", "target_goal": null, "related_topic_refs": []}],\n'
-            '  "used_evidence_refs": ["..."]\n'
-            "}"
+            '  "suggestions": [\n'
+            '    {"suggestion_id": "sug_1", "text": "一句话的下一步建议", '
+            '"target_goal": "overview|structure|entry|flow|module|dependency|layer|summary|null"}\n'
+            "  ]\n"
+            "}\n"
+            "要求：initial_report_content 尽量完整；拿不准的字段可以保守留空，但不要省略整块。suggestions 保持 1-3 条，每条不超过 30 字。"
         )
     return (
         "{\n"
-        '  "focus": "用一句短语概括本轮重点，不要复述全文",\n'
-        '  "relation_to_overall": "用一句短句说明和整体的关系",\n'
-        '  "next_steps": [{"suggestion_id": "...", "text": "...", "target_goal": "overview|structure|entry|flow|module|dependency|layer|summary|null", "related_topic_refs": []}],\n'
-        '  "related_topic_refs": [],\n'
-        '  "used_evidence_refs": ["..."]\n'
-        "}"
+        '  "next_steps": [\n'
+        '    {"suggestion_id": "sug_1", "text": "一句话的下一步建议", '
+        '"target_goal": "overview|structure|entry|flow|module|dependency|layer|summary|null"}\n'
+        "  ]\n"
+        "}\n"
+        "要求：1-3 条建议，每条不超过 30 字，语气像在带学生继续读仓库。"
     )

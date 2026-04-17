@@ -6,16 +6,23 @@ from uuid import uuid4
 
 from backend.contracts.domain import (
     AnalysisWarning,
+    ConceptMapping,
     EvidenceLine,
+    EntryCandidate,
+    FocusPoint,
     InitialReportAnswer,
     InitialReportContent,
+    KeyDirectoryItem,
     LanguageTypeSection,
+    ProjectTypeCandidate,
+    ReadingStep,
     OverviewSection,
     RecommendedStep,
     StructuredAnswer,
     StructuredMessageContent,
     Suggestion,
     TopicRef,
+    UnknownItem,
 )
 from backend.contracts.enums import (
     ConfidenceLevel,
@@ -81,7 +88,7 @@ def _extract_payload(raw_text: str) -> tuple[str, dict]:
         try:
             return visible_text, json.loads(payload_text)
         except json.JSONDecodeError:
-            break
+            return visible_text, {}
     return raw_text.strip(), {}
 
 
@@ -91,7 +98,7 @@ def _parse_initial_report_content(payload: dict, visible_text: str) -> InitialRe
         try:
             return InitialReportContent.model_validate(content)
         except Exception:
-            pass
+            return _best_effort_initial_report_content(content, visible_text)
     summary = _first_non_empty_line(visible_text) or "已生成首轮报告，但结构化区块缺失。"
     return InitialReportContent(
         overview=OverviewSection(
@@ -118,6 +125,64 @@ def _parse_initial_report_content(payload: dict, visible_text: str) -> InitialRe
         reading_path_preview=[],
         unknown_section=[],
         suggested_next_questions=_fallback_suggestions(visible_text),
+    )
+
+
+def _best_effort_initial_report_content(
+    content: dict,
+    visible_text: str,
+) -> InitialReportContent:
+    fallback = _parse_initial_report_content({}, visible_text)
+    overview = content.get("overview") if isinstance(content.get("overview"), dict) else {}
+    language_and_type = (
+        content.get("language_and_type")
+        if isinstance(content.get("language_and_type"), dict)
+        else {}
+    )
+    entry_section = (
+        content.get("entry_section") if isinstance(content.get("entry_section"), dict) else {}
+    )
+    recommended_first_step = (
+        content.get("recommended_first_step")
+        if isinstance(content.get("recommended_first_step"), dict)
+        else {}
+    )
+    return InitialReportContent(
+        overview=OverviewSection(
+            summary=_clean_text(overview.get("summary")) or fallback.overview.summary,
+            confidence=_coerce_confidence(overview.get("confidence"), fallback.overview.confidence),
+            evidence_refs=_string_list(overview.get("evidence_refs")),
+        ),
+        focus_points=_safe_model_list(content.get("focus_points"), "focus_point"),
+        repo_mapping=_safe_model_list(content.get("repo_mapping"), "repo_mapping"),
+        language_and_type=LanguageTypeSection(
+            primary_language=_clean_text(language_and_type.get("primary_language"))
+            or fallback.language_and_type.primary_language,
+            project_types=_safe_model_list(language_and_type.get("project_types"), "project_type"),
+            degradation_notice=_clean_text(language_and_type.get("degradation_notice")),
+        ),
+        key_directories=_safe_model_list(content.get("key_directories"), "key_directory"),
+        entry_section={
+            "status": _coerce_status(entry_section.get("status")),
+            "entries": _safe_model_list(entry_section.get("entries"), "entry_candidate"),
+            "fallback_advice": _clean_text(entry_section.get("fallback_advice")),
+            "unknown_items": _safe_model_list(entry_section.get("unknown_items"), "unknown_item"),
+        },
+        recommended_first_step=RecommendedStep(
+            target=_clean_text(recommended_first_step.get("target"))
+            or fallback.recommended_first_step.target,
+            reason=_clean_text(recommended_first_step.get("reason"))
+            or fallback.recommended_first_step.reason,
+            learning_gain=_clean_text(recommended_first_step.get("learning_gain"))
+            or fallback.recommended_first_step.learning_gain,
+            evidence_refs=_string_list(recommended_first_step.get("evidence_refs")),
+        ),
+        reading_path_preview=_safe_model_list(content.get("reading_path_preview"), "reading_step"),
+        unknown_section=_safe_model_list(content.get("unknown_section"), "unknown_item"),
+        suggested_next_questions=(
+            _parse_suggestions(content.get("suggested_next_questions"))
+            or _fallback_suggestions(visible_text)
+        ),
     )
 
 
@@ -210,6 +275,30 @@ def _parse_topic_refs(value: object) -> list[TopicRef]:
     return parsed
 
 
+def _safe_model_list(value: object, kind: str) -> list:
+    if not isinstance(value, list):
+        return []
+    parsed: list = []
+    model_by_kind = {
+        "focus_point": FocusPoint,
+        "repo_mapping": ConceptMapping,
+        "project_type": ProjectTypeCandidate,
+        "key_directory": KeyDirectoryItem,
+        "entry_candidate": EntryCandidate,
+        "reading_step": ReadingStep,
+        "unknown_item": UnknownItem,
+    }
+    model = model_by_kind.get(kind)
+    if model is None:
+        return []
+    for item in value:
+        try:
+            parsed.append(model.model_validate(item))
+        except Exception:
+            continue
+    return parsed
+
+
 def _parse_warnings(value: object) -> list[AnalysisWarning]:
     if not isinstance(value, list):
         return []
@@ -294,6 +383,18 @@ def _clean_text(value: object) -> str | None:
         return None
     text = value.strip()
     return text or None
+
+
+def _coerce_confidence(value: object, fallback: ConfidenceLevel) -> ConfidenceLevel:
+    if value in set(ConfidenceLevel):
+        return value
+    return fallback
+
+
+def _coerce_status(value: object) -> DerivedStatus:
+    if value in set(DerivedStatus):
+        return value
+    return DerivedStatus.UNKNOWN
 
 
 def _first_non_empty_line(text: str) -> str | None:

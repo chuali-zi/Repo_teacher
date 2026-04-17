@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator, Callable
 from typing import Any
@@ -56,19 +57,36 @@ async def stream_answer_text_with_tools(
     max_rounds = input_data.max_tool_rounds
 
     for _round in range(max_rounds + 1):
-        collected_chunks: list[str] = []
+        queue: asyncio.Queue[str | None] = asyncio.Queue()
 
         async def _on_delta(chunk: str) -> None:
-            collected_chunks.append(chunk)
+            await queue.put(chunk)
 
-        result: StreamResult = await tool_streamer(
-            messages,
-            tools=TOOL_SCHEMAS,
-            on_content_delta=_on_delta,
-        )
+        async def _runner() -> StreamResult:
+            try:
+                return await tool_streamer(
+                    messages,
+                    tools=TOOL_SCHEMAS,
+                    on_content_delta=_on_delta,
+                )
+            finally:
+                await queue.put(None)
 
-        for chunk in result.content_chunks:
-            yield chunk
+        runner_task = asyncio.create_task(_runner())
+        try:
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                yield item
+            result: StreamResult = await runner_task
+        except BaseException:
+            runner_task.cancel()
+            try:
+                await runner_task
+            except BaseException:
+                pass
+            raise
 
         if not result.tool_calls or result.finish_reason != "tool_calls":
             return

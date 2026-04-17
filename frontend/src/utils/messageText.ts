@@ -8,20 +8,7 @@ export function stripStructuredPayload(text: string) {
 
 export function hasRenderableMessageText(text: string) {
   const visibleText = stripStructuredPayload(text).trim();
-  return visibleText.length > 0 && !isPlainJsonPayload(visibleText);
-}
-
-function isPlainJsonPayload(text: string) {
-  if (!((text.startsWith('{') && text.endsWith('}')) || (text.startsWith('[') && text.endsWith(']')))) {
-    return false;
-  }
-
-  try {
-    JSON.parse(text);
-    return true;
-  } catch {
-    return false;
-  }
+  return visibleText.length > 0;
 }
 
 export function extractSuggestionHints(text: string): SuggestionDto[] {
