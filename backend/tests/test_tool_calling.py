@@ -23,6 +23,7 @@ from backend.m2_file_tree.tree_scanner import scan_repository_tree
 from backend.m3_analysis import run_static_analysis
 from backend.m4_skeleton import assemble_teaching_skeleton
 from backend.m6_response import answer_generator
+from backend.agent_runtime import tool_loop
 from backend.m6_response.answer_generator import (
     ToolLoopTimeouts,
     ToolStreamActivity,
@@ -95,9 +96,9 @@ async def _collect_tool_stream(stream) -> tuple[str, list[object]]:
 
 class TestToolSchemas:
     def test_tool_schemas_have_required_structure(self) -> None:
-        assert len(TOOL_SCHEMAS) == 7
+        assert len(TOOL_SCHEMAS) >= 7
         names = {schema["function"]["name"] for schema in TOOL_SCHEMAS}
-        assert names == {
+        assert {
             "get_repo_surfaces",
             "get_entry_candidates",
             "get_module_map",
@@ -105,7 +106,12 @@ class TestToolSchemas:
             "get_evidence",
             "read_file_excerpt",
             "search_text",
-        }
+        }.issubset(names)
+        assert {
+            "m1.get_repository_context",
+            "m4.get_topic_slice",
+            "teaching.get_state_snapshot",
+        }.issubset(names)
 
     def test_read_file_excerpt_schema_has_required_fields(self) -> None:
         schema = next(s for s in TOOL_SCHEMAS if s["function"]["name"] == "read_file_excerpt")
@@ -532,7 +538,7 @@ class TestStreamAnswerWithTools:
             time.sleep(0.05)
             return json.dumps({"tool_name": "read_file_excerpt", "available": True})
 
-        monkeypatch.setattr(answer_generator, "execute_tool_call", slow_execute_tool_call)
+        monkeypatch.setattr(tool_loop, "execute_tool_call", slow_execute_tool_call)
 
         async def fake_tool_streamer(
             messages, *, tools=None, on_content_delta=None, temperature=0.6

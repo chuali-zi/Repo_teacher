@@ -12,41 +12,24 @@ _SECRET_RE = re.compile(
 )
 
 _SYSTEM_RULES = """
-你是 Repo Tutor，一位面向编程初学者的源码仓库教学老师。
+你是 Repo Tutor，负责带用户阅读仓库源码。
 
-你的教学风格：
-- 用自然、耐心的语言带着学生理解陌生仓库，不要像在填表。
-- 记住自己已经讲过什么、下一步准备带学生看什么，保持连续的老师视角。
-- 主动带路：每轮结束时告诉学生下一步该看什么、为什么。
-- 先讲观察框架，再映射到当前仓库，最后再进入局部实现细节。
-- 每轮围绕 2-5 个核心认知点展开；浅层回答少讲术语，深层回答补证据和实现线索。
-- 如果已经有教学计划，优先沿计划推进；如果用户临时切换目标，再自然改道，不要僵硬复述旧提纲。
-- 根据学生学习状态调节讲法：未见过的主题先补框架，需要强化的主题换一种说法，不要直接跳到细节。
-- 教师工作日志是内部备课板，只用于决定本轮怎么教，不要把日志字段逐项暴露给用户。
+原则：
+- 先解释框架，再落到当前仓库证据，最后进入局部实现。
+- 优先使用工具结果、教学状态和历史摘要；证据不足时明确标注“根据推断”或“不确定”。
+- 回答自然连贯，像老师讲解，不机械复述字段名。
+- 每轮只展开少量核心点，并给出自然的下一步建议。
 
-你的知识来源：
-- 优先查看提供的 LLM 工具目录、工具结果、教学状态和历史摘要。
-- M1-M4 静态分析结果只是工具输出和参考证据，不是回答边界，也不应压住你的教学判断。
-- 当工具结果没有直接覆盖用户问题时，可以基于编程常识、已给出的仓库上下文和代码摘录合理补充，但必须标注“根据推断”或“可能”。
-- 对入口、流程、分层、依赖等不确定结论，使用“候选”“可能”“目前证据更支持”等措辞。
-- 证据不足时明确说“目前不确定”，不要硬编运行时调用链、真实数据流或不存在的模块职责。
-
-安全规则：
-- 不得输出疑似密钥、token、凭据等敏感信息。
-- 不得输出内部错误堆栈。
-
-输出格式：
-- 正文全部用 Markdown，像老师讲课一样连贯自然；不需要机械使用固定小标题。
-- 正文是第一优先级，必须自洽、完整、可直接给用户阅读；即使 JSON 侧车不完整，正文也必须保留核心教学内容。
-- 正文结束后，另起一行输出 <json_output>{...}</json_output> 包裹的 JSON，作为机器侧车；它用于增强渲染，但不是正文的替代品。
-- 首轮报告场景下，JSON 侧车应优先包含完整的 initial_report_content 和 1-3 条 suggestions；如果个别字段拿不准，可以留空，但不要省略整块结构。
-- 多轮对话场景下，JSON 侧车至少包含 next_steps；若无法稳定产出完整结构，也不要为了凑 JSON 牺牲正文质量。
-- JSON 是机器侧车，不给用户看；不要在 JSON 里重复整段正文，也不要输出无关调试信息。
+安全与输出：
+- 不输出密钥、token、凭据或内部堆栈。
+- 正文用 Markdown。
+- 正文结束后，单独输出 `<json_output>{...}</json_output>` 作为机器侧车。
+- 正文必须完整，JSON 只是补充。
 """.strip()
 
 
 def build_messages(input_data: PromptBuildInput) -> list[dict[str, str]]:
-    messages: list[dict[str, str]] = []
+    payload = _build_payload(input_data)
     system_parts = [
         _SYSTEM_RULES,
         f"当前场景: {input_data.scenario}",
@@ -54,21 +37,21 @@ def build_messages(input_data: PromptBuildInput) -> list[dict[str, str]]:
         _scenario_guidance(input_data.scenario),
         _tool_calling_guidance(input_data),
         _output_requirements(input_data),
-        "JSON 结构要求:\n" + _json_schema_for_scenario(input_data.scenario),
+        "JSON 侧车结构:\n" + _json_schema_for_scenario(input_data.scenario),
         "以下是当前仓库的 LLM 工具目录、工具结果、教学状态和历史摘要。工具结果均为只读参考，请基于这些素材回答：",
-        json.dumps(_build_payload(input_data), ensure_ascii=False, indent=2, sort_keys=True),
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
     ]
-    messages.append(
+    messages: list[dict[str, str]] = [
         {"role": "system", "content": "\n\n".join(part for part in system_parts if part)}
-    )
+    ]
 
-    for msg in input_data.conversation_state.messages[-8:]:
-        if msg.role == "user":
-            messages.append({"role": "user", "content": _sanitize_value(msg.raw_text)})
-        elif msg.role == "agent":
-            visible = _strip_json_output(msg.raw_text)
-            if len(visible) > 1500:
-                visible = visible[:1500] + "\n...(已截断)"
+    for message in input_data.conversation_state.messages[-6:]:
+        if message.role == "user":
+            messages.append({"role": "user", "content": _sanitize_value(message.raw_text)})
+        elif message.role == "agent":
+            visible = _strip_json_output(message.raw_text)
+            if len(visible) > 1000:
+                visible = visible[:997] + "..."
             messages.append({"role": "assistant", "content": _sanitize_value(visible)})
 
     current_user_text = _sanitize_value(input_data.user_message or "")
@@ -78,7 +61,6 @@ def build_messages(input_data: PromptBuildInput) -> list[dict[str, str]]:
         or messages[-1].get("content") != current_user_text
     ):
         messages.append({"role": "user", "content": current_user_text})
-
     return messages
 
 
@@ -107,52 +89,51 @@ def _build_payload(input_data: PromptBuildInput) -> dict[str, Any]:
 
 
 def _tool_context(input_data: PromptBuildInput) -> dict[str, Any]:
-    if input_data.tool_context:
+    if input_data.tool_context is not None:
         return input_data.tool_context.model_dump(mode="json")
     skeleton = input_data.teaching_skeleton
     return {
-        "policy": (
-            "兼容模式：未传入正式 LLM 工具上下文，以下由 PromptBuildInput 中的"
-            "教学骨架和主题引用临时投影而来，仅作参考。"
-        ),
+        "policy": "兼容模式：未传入正式工具上下文，以下仅提供最小教学骨架投影。",
         "tools": [],
         "tool_results": [
             {
                 "tool_name": "m4.get_initial_report_skeleton",
                 "source_module": "m4_skeleton.skeleton_assembler",
-                "summary": "教学骨架兼容投影。",
+                "summary": "兼容模式下的最小教学骨架投影。",
                 "reference_only": True,
                 "payload": {
                     "overview": skeleton.overview.model_dump(mode="json"),
                     "focus_points": [
-                        item.model_dump(mode="json") for item in skeleton.focus_points
+                        item.model_dump(mode="json") for item in skeleton.focus_points[:4]
                     ],
                     "repo_mapping": [
-                        item.model_dump(mode="json") for item in skeleton.repo_mapping
+                        item.model_dump(mode="json") for item in skeleton.repo_mapping[:4]
                     ],
                     "language_and_type": skeleton.language_and_type.model_dump(mode="json"),
                     "key_directories": [
-                        item.model_dump(mode="json") for item in skeleton.key_directories
+                        item.model_dump(mode="json") for item in skeleton.key_directories[:6]
                     ],
                     "entry_section": skeleton.entry_section.model_dump(mode="json"),
                     "recommended_first_step": skeleton.recommended_first_step.model_dump(
                         mode="json"
                     ),
                     "reading_path_preview": [
-                        item.model_dump(mode="json") for item in skeleton.reading_path_preview
+                        item.model_dump(mode="json")
+                        for item in skeleton.reading_path_preview[:4]
                     ],
                     "unknown_section": [
-                        item.model_dump(mode="json") for item in skeleton.unknown_section
+                        item.model_dump(mode="json") for item in skeleton.unknown_section[:4]
                     ],
                     "suggested_next_questions": [
-                        item.model_dump(mode="json") for item in skeleton.suggested_next_questions
+                        item.model_dump(mode="json")
+                        for item in skeleton.suggested_next_questions[:3]
                     ],
                 },
             },
             {
                 "tool_name": "m4.get_topic_slice",
                 "source_module": "m4_skeleton.topic_indexer",
-                "summary": "本轮主题引用切片。",
+                "summary": "兼容模式下的主题切片。",
                 "reference_only": True,
                 "payload": {
                     "topic_slice": [item.model_dump(mode="json") for item in input_data.topic_slice]
@@ -164,12 +145,15 @@ def _tool_context(input_data: PromptBuildInput) -> dict[str, Any]:
 
 def _sanitize_conversation(input_data: PromptBuildInput) -> dict[str, Any]:
     conversation = input_data.conversation_state.model_dump(mode="json")
-    conversation.pop("messages", None)
-    conversation.pop("teaching_plan_state", None)
-    conversation.pop("student_learning_state", None)
-    conversation.pop("teacher_working_log", None)
-    conversation.pop("current_teaching_decision", None)
-    conversation.pop("teaching_debug_events", None)
+    for key in (
+        "messages",
+        "teaching_plan_state",
+        "student_learning_state",
+        "teacher_working_log",
+        "current_teaching_decision",
+        "teaching_debug_events",
+    ):
+        conversation.pop(key, None)
     return _sanitize_value(conversation)
 
 
@@ -192,35 +176,16 @@ def _scenario_guidance(scenario: PromptScenario) -> str:
     if scenario == PromptScenario.INITIAL_REPORT:
         return (
             "场景说明:\n"
-            "- 这是首轮报告。优先使用 m4.get_initial_report_skeleton 的工具结果建立仓库地图。\n"
-            "- 你要像第一次带学生读这个仓库的老师，先帮学生建立观察框架，再给一条可执行的教学路线。\n"
-            "- 用户可见 Markdown 的顺序必须贴合：概览、先抓什么、仓库映射、语言与类型、关键目录、入口候选、"
-            "推荐第一步、阅读路径、不确定项、下一步建议。\n"
-            "- initial_report_content 的确定性字段必须来自工具证据；如果用代码常识补充，只能用候选措辞放在正文或不确定项里。"
+            "- 这是首轮报告，先帮助用户建立整体仓库地图。\n"
+            "- 优先借助教学骨架、入口候选、模块地图和阅读路径组织讲解。"
         )
     if scenario == PromptScenario.GOAL_SWITCH:
-        return (
-            "场景说明:\n"
-            "- 这是目标切换确认。focus 先明确“接下来改为聚焦什么”。\n"
-            "- message_type 对应 goal_switch_confirmation。"
-        )
+        return "场景说明:\n- 用户正在切换学习目标，先确认新的讲解焦点。"
     if scenario == PromptScenario.DEPTH_ADJUSTMENT:
-        return (
-            "场景说明:\n"
-            "- 这是深浅调整。focus 先明确“讲解深度已调整”。\n"
-            "- 不改变学习目标，只改变表达粒度。"
-        )
+        return "场景说明:\n- 用户正在调整讲解深浅，保持目标不变，只调整表达粒度。"
     if scenario == PromptScenario.STAGE_SUMMARY:
-        return (
-            "场景说明:\n"
-            "- 这是阶段性总结。优先总结已讲内容、未展开内容和自然下一步。\n"
-            "- 重点利用 explained_items 和 history_summary。"
-        )
-    return (
-        "场景说明:\n"
-        "- 这是多轮追问。优先查看 m4.get_topic_slice 以及相关 M1-M4 工具结果。\n"
-        "- 如果用户问题超出当前主题切片，可结合其他工具结果、文件摘录和编程常识保守补充。"
-    )
+        return "场景说明:\n- 用户需要阶段总结，回顾已讲内容、未展开内容和自然下一步。"
+    return "场景说明:\n- 这是 follow-up 回合，优先围绕当前 topic slice 和教学计划继续推进。"
 
 
 def _tool_calling_guidance(input_data: PromptBuildInput) -> str:
@@ -228,45 +193,36 @@ def _tool_calling_guidance(input_data: PromptBuildInput) -> str:
         return ""
     return (
         "工具调用说明:\n"
-        "- 本轮优先使用 get_repo_surfaces、get_entry_candidates、get_module_map、get_reading_path、get_evidence 这些教学型工具。\n"
-        "- 只有在高层工具还不足以解释用户问题时，再调用 read_file_excerpt 或 search_text 查看具体代码。\n"
-        "- 仅在已有工具结果不足以回答用户问题时才调用工具，不要为了调用而调用。\n"
-        "- 调用工具后，用工具返回的实际内容来支撑你的讲解，不要编造代码细节。\n"
-        "- 每轮最多调用 2-3 次工具，先决定教学主线，再补代码证据。\n"
-        "- 工具结果中的 [redacted_secret] 是脱敏标记，不要对其内容进行猜测。"
+        "- 先用静态分析类工具理解结构，再按需读取源码。\n"
+        "- 只有已有证据不足时才调用工具，不要为调用而调用。\n"
+        "- 优先高层工具，必要时再用 read_file_excerpt 或 search_text 补代码证据。"
     )
 
 
 def _output_requirements(input_data: PromptBuildInput) -> str:
     required_sections = ", ".join(input_data.output_contract.required_sections)
     return (
-        f"回答建议包含以下部分（自然衔接，不需要机械使用这些标题）：{required_sections}\n"
-        f"核心认知点控制在 {input_data.output_contract.max_core_points} 个以内。\n"
-        "正文要像老师在带学生阅读仓库，而不是在逐项填写结构化表单。\n"
-        "先阅读 teaching_decision，它是本轮回答前的教学决策摘要；正文应体现这个决策，但不要机械复述字段名。\n"
-        "先看 teacher_working_log 和 teaching_plan 的 active/completed/planned 状态，再决定本轮是推进、回扣还是改道。\n"
-        "如果 student_learning_state 标记 needs_reinforcement，先补概念和当前仓库落点，再继续推进。\n"
-        "每轮结尾给出 1-3 条下一步建议，语气像在带学生继续读仓库。\n"
-        "不确定的结论必须标注；静态证据不足时不要伪造确定流程。"
+        f"回答建议自然覆盖这些部分: {required_sections}\n"
+        f"核心点控制在 {input_data.output_contract.max_core_points} 个以内。\n"
+        "明确标注不确定性，不伪造运行时细节。"
     )
 
 
 def _teacher_memory(input_data: PromptBuildInput) -> dict[str, Any]:
     conversation = input_data.conversation_state
-    explained_items = [
-        {
-            "topic": item.topic,
-            "item_type": item.item_type,
-            "item_id": item.item_id,
-            "explained_at_message_id": item.explained_at_message_id,
-        }
-        for item in conversation.explained_items[-8:]
-    ]
     return {
         "current_learning_goal": conversation.current_learning_goal,
         "current_stage": conversation.current_stage,
         "depth_level": input_data.depth_level,
-        "already_explained": explained_items,
+        "already_explained": [
+            {
+                "topic": item.topic,
+                "item_type": item.item_type,
+                "item_id": item.item_id,
+                "explained_at_message_id": item.explained_at_message_id,
+            }
+            for item in conversation.explained_items[-8:]
+        ],
         "recent_suggestions": [
             item.model_dump(mode="json") for item in conversation.last_suggestions[:3]
         ],
@@ -281,54 +237,54 @@ def _teacher_memory(input_data: PromptBuildInput) -> dict[str, Any]:
 
 def _teaching_plan(input_data: PromptBuildInput) -> dict[str, Any]:
     plan = input_data.conversation_state.teaching_plan_state
-    if plan:
+    if plan is None:
+        skeleton = input_data.teaching_skeleton
         return {
-            "plan_id": plan.plan_id,
-            "current_step_id": plan.current_step_id,
-            "steps": [
-                {
-                    "step_id": step.step_id,
-                    "title": step.title,
-                    "goal": step.goal,
-                    "target_scope": step.target_scope,
-                    "reason": step.reason,
-                    "expected_learning_gain": step.expected_learning_gain,
-                    "status": step.status,
-                    "priority": step.priority,
-                    "depends_on": step.depends_on,
-                    "source_topic_refs": [
-                        item.model_dump(mode="json") for item in step.source_topic_refs[:4]
-                    ],
-                    "adaptation_note": step.adaptation_note,
-                }
-                for step in plan.steps[:8]
+            "opening_focus": [
+                item.model_dump(mode="json") for item in skeleton.focus_points[:4]
             ],
-            "update_notes": plan.update_notes[-5:],
+            "recommended_first_step": skeleton.recommended_first_step.model_dump(mode="json"),
+            "reading_path": [
+                {
+                    "step_no": step.step_no,
+                    "target": step.target,
+                    "reason": step.reason,
+                    "learning_gain": step.learning_gain,
+                }
+                for step in skeleton.reading_path_preview[:6]
+            ],
+            "suggested_next_questions": [
+                item.model_dump(mode="json") for item in skeleton.suggested_next_questions[:3]
+            ],
         }
-
-    skeleton = input_data.teaching_skeleton
-    reading_path = [
-        {
-            "step_no": step.step_no,
-            "target": step.target,
-            "reason": step.reason,
-            "learning_gain": step.learning_gain,
-        }
-        for step in skeleton.reading_path_preview[:6]
-    ]
     return {
-        "opening_focus": [item.model_dump(mode="json") for item in skeleton.focus_points[:4]],
-        "recommended_first_step": skeleton.recommended_first_step.model_dump(mode="json"),
-        "reading_path": reading_path,
-        "suggested_next_questions": [
-            item.model_dump(mode="json") for item in skeleton.suggested_next_questions[:3]
+        "plan_id": plan.plan_id,
+        "current_step_id": plan.current_step_id,
+        "steps": [
+            {
+                "step_id": step.step_id,
+                "title": step.title,
+                "goal": step.goal,
+                "target_scope": step.target_scope,
+                "reason": step.reason,
+                "expected_learning_gain": step.expected_learning_gain,
+                "status": step.status,
+                "priority": step.priority,
+                "depends_on": step.depends_on,
+                "source_topic_refs": [
+                    item.model_dump(mode="json") for item in step.source_topic_refs[:4]
+                ],
+                "adaptation_note": step.adaptation_note,
+            }
+            for step in plan.steps[:8]
         ],
+        "update_notes": plan.update_notes[-5:],
     }
 
 
 def _student_learning_state(input_data: PromptBuildInput) -> dict[str, Any] | None:
     student_state = input_data.conversation_state.student_learning_state
-    if not student_state:
+    if student_state is None:
         return None
     return {
         "state_id": student_state.state_id,
@@ -351,7 +307,7 @@ def _student_learning_state(input_data: PromptBuildInput) -> dict[str, Any] | No
 
 def _teacher_working_log(input_data: PromptBuildInput) -> dict[str, Any] | None:
     log = input_data.conversation_state.teacher_working_log
-    if not log:
+    if log is None:
         return None
     return {
         "current_teaching_objective": log.current_teaching_objective,
@@ -367,7 +323,7 @@ def _teacher_working_log(input_data: PromptBuildInput) -> dict[str, Any] | None:
 
 def _teaching_decision(input_data: PromptBuildInput) -> dict[str, Any] | None:
     decision = input_data.conversation_state.current_teaching_decision
-    if not decision:
+    if decision is None:
         return None
     return {
         "decision_id": decision.decision_id,
@@ -387,32 +343,16 @@ def _teaching_decision(input_data: PromptBuildInput) -> dict[str, Any] | None:
 def _json_schema_for_scenario(scenario: PromptScenario) -> str:
     if scenario == PromptScenario.INITIAL_REPORT:
         return (
-            "{\n"
-            '  "initial_report_content": {\n'
-            '    "overview": {"summary": "一句话概览", "confidence": "high|medium|low|unknown", "evidence_refs": []},\n'
-            '    "focus_points": [],\n'
-            '    "repo_mapping": [],\n'
-            '    "language_and_type": {"primary_language": "Python", "project_types": [], "degradation_notice": null},\n'
-            '    "key_directories": [],\n'
-            '    "entry_section": {"status": "confirmed|heuristic|unknown", "entries": [], "fallback_advice": null},\n'
-            '    "recommended_first_step": {"target": "先看哪里", "reason": "为什么", "learning_gain": "学到什么", "evidence_refs": []},\n'
-            '    "reading_path_preview": [],\n'
-            '    "unknown_section": [],\n'
-            '    "suggested_next_questions": []\n'
-            "  },\n"
-            '  "suggestions": [\n'
-            '    {"suggestion_id": "sug_1", "text": "一句话的下一步建议", '
-            '"target_goal": "overview|structure|entry|flow|module|dependency|layer|summary|null"}\n'
-            "  ]\n"
-            "}\n"
-            "要求：initial_report_content 尽量完整；拿不准的字段可以保守留空，但不要省略整块。suggestions 保持 1-3 条，每条不超过 30 字。"
+            "{"
+            '"initial_report_content":{"overview":{"summary":"一句话概览","confidence":"high|medium|low|unknown","evidence_refs":[]},'
+            '"focus_points":[],"repo_mapping":[],"language_and_type":{"primary_language":"Python","project_types":[],"degradation_notice":null},'
+            '"key_directories":[],"entry_section":{"status":"confirmed|heuristic|unknown","entries":[],"fallback_advice":null},'
+            '"recommended_first_step":{"target":"先看哪里","reason":"为什么","learning_gain":"学到什么","evidence_refs":[]},'
+            '"reading_path_preview":[],"unknown_section":[],"suggested_next_questions":[]},'
+            '"suggestions":[{"suggestion_id":"sug_1","text":"下一步建议","target_goal":"overview|structure|entry|flow|module|dependency|layer|summary|null"}]}'
         )
     return (
-        "{\n"
-        '  "next_steps": [\n'
-        '    {"suggestion_id": "sug_1", "text": "一句话的下一步建议", '
-        '"target_goal": "overview|structure|entry|flow|module|dependency|layer|summary|null"}\n'
-        "  ]\n"
-        "}\n"
-        "要求：1-3 条建议，每条不超过 30 字，语气像在带学生继续读仓库。"
+        "{"
+        '"next_steps":[{"suggestion_id":"sug_1","text":"下一步建议","target_goal":"overview|structure|entry|flow|module|dependency|layer|summary|null"}]'
+        "}"
     )

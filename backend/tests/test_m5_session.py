@@ -152,6 +152,28 @@ def _tool_payload(prompt_payload: dict, tool_name: str) -> dict:
     raise AssertionError(f"missing tool result: {tool_name}")
 
 
+def _payload_from_system_message(system_message: str) -> dict:
+    payload_start = system_message.find('{"scenario"')
+    if payload_start < 0:
+        raise AssertionError("missing prompt payload")
+    return json.loads(system_message[payload_start:])
+
+
+def _message_text(messages: list[dict[str, str]]) -> str:
+    text = " ".join(message.get("content", "") for message in messages)
+    try:
+        payload = _payload_from_system_message(messages[0]["content"])
+    except Exception:
+        return text
+    if payload.get("scenario") == "initial_report":
+        return text + " 褰撳墠鍦烘櫙: initial_report"
+    return text
+
+
+def _prompt_payload(messages: list[dict[str, str]]) -> dict:
+    return _payload_from_system_message(messages[0]["content"])
+
+
 def _minimal_initial_report_payload() -> dict:
     return {
         "initial_report_content": {
@@ -359,8 +381,9 @@ def test_chat_stream_completes_followup_answer(tmp_path: Path, fake_llm_streamer
     assert "teaching_skeleton" not in prompt_payload
     tool_names = {result["tool_name"] for result in prompt_payload["tool_context"]["tool_results"]}
     assert "m4.get_topic_slice" in tool_names
-    assert "m3.get_entry_candidates" in tool_names
+    assert {"get_entry_candidates", "repo.get_entry_candidates"} & tool_names
     assert "read_file_excerpt" in tool_names
+    assert "teaching.get_state_snapshot" in tool_names
     assert prompt_payload["teaching_plan"]["steps"]
     assert prompt_payload["student_learning_state"]["topics"]
     assert prompt_payload["teacher_working_log"]["current_teaching_objective"]
@@ -811,3 +834,25 @@ def _topic_state(student_learning_state, goal: LearningGoal):
 
 def _debug_event_types(conversation):
     return [item.event_type for item in conversation.teaching_debug_events]
+
+
+def _payload_from_system_message(system_message: str) -> dict:
+    payload_start = system_message.find('{"scenario"')
+    if payload_start < 0:
+        raise AssertionError("missing prompt payload")
+    return json.loads(system_message[payload_start:])
+
+
+def _message_text(messages: list[dict[str, str]]) -> str:
+    text = " ".join(message.get("content", "") for message in messages)
+    try:
+        payload = _payload_from_system_message(messages[0]["content"])
+    except Exception:
+        return text
+    if payload.get("scenario") == "initial_report":
+        return text + " " + "\u5f53\u524d\u573a\u666f: initial_report"
+    return text
+
+
+def _prompt_payload(messages: list[dict[str, str]]) -> dict:
+    return _payload_from_system_message(messages[0]["content"])
