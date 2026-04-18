@@ -90,6 +90,7 @@ npm run dev
 ```
 
 或使用 Windows 脚本：`scripts\dev_frontend.cmd`
+一键启动： scripts\dev_all.ps1
 
 ### 4. 使用
 
