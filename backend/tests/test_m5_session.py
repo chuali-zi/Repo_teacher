@@ -7,8 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from backend.contracts.domain import RuntimeEvent
+from backend.contracts.domain import AgentActivity, RuntimeEvent
 from backend.contracts.enums import (
+    AgentActivityPhase,
     ConversationSubStatus,
     ErrorCode,
     LearningGoal,
@@ -151,6 +152,43 @@ def _tool_payload(prompt_payload: dict, tool_name: str) -> dict:
     raise AssertionError(f"missing tool result: {tool_name}")
 
 
+def _minimal_initial_report_payload() -> dict:
+    return {
+        "initial_report_content": {
+            "overview": {
+                "summary": "Sidecar-only report.",
+                "confidence": "medium",
+                "evidence_refs": [],
+            },
+            "focus_points": [],
+            "repo_mapping": [],
+            "language_and_type": {
+                "primary_language": "Python",
+                "project_types": [],
+                "degradation_notice": None,
+            },
+            "key_directories": [],
+            "entry_section": {
+                "status": "unknown",
+                "entries": [],
+                "fallback_advice": None,
+                "unknown_items": [],
+            },
+            "recommended_first_step": {
+                "target": "README.md",
+                "reason": "Start from the repository overview.",
+                "learning_gain": "Build the first mental map.",
+                "evidence_refs": [],
+            },
+            "reading_path_preview": [],
+            "unknown_section": [],
+            "suggested_next_questions": [],
+        },
+        "suggestions": [],
+        "used_evidence_refs": [],
+    }
+
+
 def test_analysis_stream_completes_initial_report_for_local_repo(tmp_path: Path) -> None:
     (tmp_path / "README.md").write_text("# demo\n", encoding="utf-8")
     (tmp_path / "main.py").write_text("print('hi')\n", encoding="utf-8")
@@ -203,6 +241,61 @@ def test_analysis_stream_completes_initial_report_for_local_repo(tmp_path: Path)
         TeachingDebugEventType.TEACHING_PLAN_SELECTED,
     ]
     assert TeachingDebugEventType.TEACHING_DECISION_BUILT in _debug_event_types(conversation)
+
+    session_service.clear_active_session()
+
+
+def test_initial_report_preserves_visible_text_when_sidecar_json_is_invalid(
+    tmp_path: Path,
+) -> None:
+    async def invalid_sidecar_stream(messages: list[dict[str, str]]):
+        yield (
+            "## Visible report\n"
+            "This teacher-written text must survive JSON parsing failure.\n"
+            "<json_output>{ invalid json }</json_output>"
+        )
+
+    session_service.llm_streamer = invalid_sidecar_stream
+    (tmp_path / "README.md").write_text("# demo\n", encoding="utf-8")
+    (tmp_path / "main.py").write_text("print('hi')\n", encoding="utf-8")
+
+    session_service.create_repo_session(str(tmp_path))
+    session_id = session_service.store.active_session.session_id
+    events = asyncio.run(_collect(iter_analysis_events(session_id)))
+
+    assert events[-1].event_type == RuntimeEventType.MESSAGE_COMPLETED
+    assert events[-1].message.raw_text.startswith("## Visible report")
+    assert "<json_output>" not in events[-1].message.raw_text
+
+    snapshot = session_service.get_snapshot(session_id)
+    assert snapshot.messages[-1].raw_text.startswith("## Visible report")
+    assert snapshot.status == SessionStatus.CHATTING
+
+    session_service.clear_active_session()
+
+
+def test_initial_report_json_only_output_fails_instead_of_completed_message(
+    tmp_path: Path,
+) -> None:
+    async def json_only_stream(messages: list[dict[str, str]]):
+        payload = json.dumps(_minimal_initial_report_payload(), ensure_ascii=False)
+        yield f"<json_output>{payload}</json_output>"
+
+    session_service.llm_streamer = json_only_stream
+    (tmp_path / "README.md").write_text("# demo\n", encoding="utf-8")
+    (tmp_path / "main.py").write_text("print('hi')\n", encoding="utf-8")
+
+    session_service.create_repo_session(str(tmp_path))
+    session_id = session_service.store.active_session.session_id
+    events = asyncio.run(_collect(iter_analysis_events(session_id)))
+
+    assert not any(event.event_type == RuntimeEventType.MESSAGE_COMPLETED for event in events)
+    assert events[-1].event_type == RuntimeEventType.ERROR
+    assert events[-1].error.error_code == ErrorCode.ANALYSIS_FAILED
+
+    snapshot = session_service.get_snapshot(session_id)
+    assert snapshot.status == SessionStatus.ANALYSIS_ERROR
+    assert snapshot.messages == []
 
     session_service.clear_active_session()
 
@@ -502,7 +595,10 @@ def test_pending_chat_turn_does_not_replay_previous_completion(tmp_path: Path) -
     session_service.accept_chat_message(session_id, "second question")
     second_events = asyncio.run(_collect(iter_chat_events(session_id)))
     first_non_status = next(
-        event for event in second_events if event.event_type != RuntimeEventType.STATUS_CHANGED
+        event
+        for event in second_events
+        if event.event_type
+        not in {RuntimeEventType.STATUS_CHANGED, RuntimeEventType.AGENT_ACTIVITY}
     )
 
     assert first_non_status.event_type == RuntimeEventType.ANSWER_STREAM_START
@@ -592,6 +688,30 @@ def test_runtime_event_to_sse_maps_message_completed_payload() -> None:
 
     assert sse.event_type == RuntimeEventType.MESSAGE_COMPLETED
     assert sse.message.message_type == MessageType.AGENT_ANSWER
+
+
+def test_runtime_event_to_sse_maps_agent_activity_payload() -> None:
+    event = RuntimeEvent(
+        event_id="evt_a1",
+        session_id="sess_1",
+        event_type=RuntimeEventType.AGENT_ACTIVITY,
+        occurred_at=datetime.now(UTC),
+        activity=AgentActivity(
+            activity_id="act_1",
+            phase=AgentActivityPhase.TOOL_RUNNING,
+            summary="正在读取 backend/main.py 的代码摘录",
+            tool_name="read_file_excerpt",
+            tool_arguments={"relative_path": "backend/main.py"},
+            round_index=1,
+            elapsed_ms=1800,
+        ),
+    )
+
+    sse = runtime_event_to_sse(event)
+
+    assert sse.event_type == RuntimeEventType.AGENT_ACTIVITY
+    assert sse.activity.phase == AgentActivityPhase.TOOL_RUNNING
+    assert sse.activity.tool_name == "read_file_excerpt"
 
 
 async def _collect(iterator) -> list:

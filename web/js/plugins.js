@@ -6,6 +6,12 @@
 //   - "view:change"           payload: { from, to }
 //   - "thinking:start"        payload: { messageId? }
 //   - "thinking:stop"         payload: { messageId? }
+//   - "agent:activity"        payload: { activity }
+//   - "tool:activity"         payload: { activity }
+//   - "tool:start"            payload: { activity }
+//   - "tool:end"              payload: { activity }
+//   - "tool:fail"             payload: { activity }
+//   - "tool:degrade"          payload: { activity }
 //   - "stream:delta"          payload: { messageId, delta }
 //   - "stream:end"            payload: { messageId }
 //   - "message:append"        payload: MessageDto

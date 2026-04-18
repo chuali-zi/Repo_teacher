@@ -11,20 +11,114 @@ import json
 from typing import Any
 
 from backend.contracts.domain import (
+    AnalysisBundle,
     FileTreeSnapshot,
     LlmToolResult,
     RepositoryContext,
+    TeachingSkeleton,
 )
 from backend.llm_tools.context_builder import read_file_excerpt, search_text
+from backend.repo_kb.query_service import (
+    get_entry_candidates,
+    get_evidence,
+    get_module_map,
+    get_reading_path,
+    get_repo_surfaces,
+)
 
 TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "get_repo_surfaces",
+            "description": "读取仓库分区，区分产品代码区、工作区元目录、文档区和工具区。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "mode": {
+                        "type": "string",
+                        "enum": ["teaching", "workspace"],
+                        "default": "teaching",
+                    }
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_entry_candidates",
+            "description": "读取按模式过滤后的入口候选，优先区分主产品入口和工具入口。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "mode": {
+                        "type": "string",
+                        "enum": ["teaching", "workspace"],
+                        "default": "teaching",
+                    }
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_module_map",
+            "description": "读取按模式过滤后的模块地图，帮助决定从哪条主线开始讲。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "mode": {
+                        "type": "string",
+                        "enum": ["teaching", "workspace"],
+                        "default": "teaching",
+                    }
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_reading_path",
+            "description": "读取当前教学目标或指定目标下的阅读路径建议。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "goal": {"type": "string"},
+                    "mode": {
+                        "type": "string",
+                        "enum": ["teaching", "workspace"],
+                        "default": "teaching",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_evidence",
+            "description": "按 target 或 evidence_ids 检索证据。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target": {"type": "string"},
+                    "evidence_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "read_file_excerpt",
             "description": (
-                "安全读取仓库中一个非敏感文件的指定行范围摘录。"
-                "用于按需查看用户追问涉及的源码细节。"
+                "安全读取仓库中一个非敏感文件的指定行范围摘录。用于按需查看用户追问涉及的源码细节。"
             ),
             "parameters": {
                 "type": "object",
@@ -82,9 +176,49 @@ def execute_tool_call(
     *,
     repository: RepositoryContext,
     file_tree: FileTreeSnapshot,
+    analysis: AnalysisBundle | None = None,
+    teaching_skeleton: TeachingSkeleton | None = None,
 ) -> str:
     """Execute a single tool call and return a JSON string for the LLM."""
-    if tool_name == "read_file_excerpt":
+    if tool_name == "get_repo_surfaces":
+        result = _require_analysis(
+            tool_name,
+            analysis,
+            lambda current: get_repo_surfaces(current, mode=arguments.get("mode", "teaching")),
+        )
+    elif tool_name == "get_entry_candidates":
+        result = _require_analysis(
+            tool_name,
+            analysis,
+            lambda current: get_entry_candidates(current, mode=arguments.get("mode", "teaching")),
+        )
+    elif tool_name == "get_module_map":
+        result = _require_analysis(
+            tool_name,
+            analysis,
+            lambda current: get_module_map(current, mode=arguments.get("mode", "teaching")),
+        )
+    elif tool_name == "get_reading_path":
+        result = _require_analysis(
+            tool_name,
+            analysis,
+            lambda current: get_reading_path(
+                current,
+                goal=arguments.get("goal"),
+                mode=arguments.get("mode", "teaching"),
+            ),
+        )
+    elif tool_name == "get_evidence":
+        result = _require_analysis(
+            tool_name,
+            analysis,
+            lambda current: get_evidence(
+                current,
+                evidence_ids=arguments.get("evidence_ids"),
+                target=arguments.get("target"),
+            ),
+        )
+    elif tool_name == "read_file_excerpt":
         result = read_file_excerpt(
             repository,
             file_tree,
@@ -114,3 +248,20 @@ def _serialize_tool_result(result: LlmToolResult) -> str:
         **result.payload,
     }
     return json.dumps(payload, ensure_ascii=False, default=str)
+
+
+def _require_analysis(
+    tool_name: str,
+    analysis: AnalysisBundle | None,
+    factory: Any,
+) -> LlmToolResult:
+    if analysis is None:
+        return LlmToolResult(
+            result_id=f"tool_missing_{tool_name}",
+            tool_name=tool_name,
+            source_module="m6_response.tool_executor",
+            summary=f"{tool_name} 缺少分析上下文。",
+            payload={"available": False, "reason": "analysis_not_available"},
+            reference_only=True,
+        )
+    return factory(analysis)

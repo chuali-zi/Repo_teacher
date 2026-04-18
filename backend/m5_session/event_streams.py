@@ -71,6 +71,11 @@ def _chat_reconnect_events(session_id: str) -> list:
         session.status == SessionStatus.CHATTING
         and session.conversation.sub_status != ConversationSubStatus.WAITING_USER
     ):
+        activity_event = session_service.latest_runtime_event(
+            session_id, RuntimeEventType.AGENT_ACTIVITY
+        )
+        if activity_event is not None:
+            events.append(activity_event)
         return _dedupe_by_event_id(events)
 
     final_event = session_service.latest_chat_terminal_event(session_id)

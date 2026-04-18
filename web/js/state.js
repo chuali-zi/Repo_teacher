@@ -10,6 +10,8 @@ const initial = {
   progressSteps: [],
   degradationNotices: [],
   messages: [], // MessageDto[]; streaming messages added with synthetic local entry
+  activeAgentActivity: null,
+  activityHistory: [],
   activeError: null,
   activeStream: null, // { kind: "analysis"|"chat", messageId: string, text: string }
   bootError: null,
@@ -55,6 +57,8 @@ export function applySessionSnapshot(snap) {
     progressSteps: snap.progress_steps ?? [],
     degradationNotices: snap.degradation_notices ?? [],
     messages: snap.messages ?? [],
+    activeAgentActivity: snap.active_agent_activity ?? null,
+    activityHistory: snap.active_agent_activity ? [snap.active_agent_activity] : [],
     activeError: snap.active_error ?? null,
     activeStream: null,
   });

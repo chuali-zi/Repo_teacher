@@ -19,6 +19,13 @@ from backend.contracts.domain import (
 )
 from backend.contracts.enums import FileNodeStatus, FileNodeType
 from backend.m3_analysis._helpers import stable_id
+from backend.repo_kb.query_service import (
+    get_entry_candidates as kb_get_entry_candidates,
+    get_evidence as kb_get_evidence,
+    get_module_map as kb_get_module_map,
+    get_reading_path as kb_get_reading_path,
+    get_repo_surfaces as kb_get_repo_surfaces,
+)
 from backend.security.safety import resolve_repo_relative_path
 
 REFERENCE_POLICY = (
@@ -35,6 +42,45 @@ _MAX_EXCERPT_BYTES = 240_000
 
 def tool_definitions() -> list[LlmToolDefinition]:
     return [
+        LlmToolDefinition(
+            tool_name="repo.get_surfaces",
+            source_module="repo_kb.query_service",
+            description="读取仓库 surface 分区，区分产品区、文档区、工具区和 workspace/meta 区。",
+            input_schema={"mode": "teaching|workspace, default teaching"},
+            output_contract="Surface assignments visible in the current mode.",
+        ),
+        LlmToolDefinition(
+            tool_name="repo.get_entry_candidates",
+            source_module="repo_kb.query_service",
+            description="读取按模式过滤后的入口候选，显式区分主产品入口、次级运行点和工具入口。",
+            input_schema={"mode": "teaching|workspace, default teaching"},
+            output_contract="Mode-aware grouped entry candidates.",
+        ),
+        LlmToolDefinition(
+            tool_name="repo.get_module_map",
+            source_module="repo_kb.query_service",
+            description="读取按模式过滤后的模块地图，帮助老师决定先讲产品主线还是工作区支线。",
+            input_schema={"mode": "teaching|workspace, default teaching"},
+            output_contract="Mode-aware module summaries.",
+        ),
+        LlmToolDefinition(
+            tool_name="repo.get_reading_path",
+            source_module="repo_kb.query_service",
+            description="读取与当前教学目标对应的阅读路径建议。",
+            input_schema={
+                "goal": "optional LearningGoal",
+                "mode": "teaching|workspace, default teaching",
+            },
+            output_contract="Mode-aware reading path list.",
+        ),
+        LlmToolDefinition(
+            tool_name="repo.get_evidence",
+            source_module="repo_kb.query_service",
+            description="按 evidence id 或目标路径检索相关证据，用于支撑当前教学结论。",
+            input_schema={"evidence_ids": "optional list[str]", "target": "optional str"},
+            output_contract="Filtered EvidenceRef list.",
+            safety_notes=["敏感来源不含正文摘录。"],
+        ),
         LlmToolDefinition(
             tool_name="m1.get_repository_context",
             source_module="m1_repo_access",
@@ -173,6 +219,14 @@ def build_llm_tool_context(
     topic_slice: list[TopicRef],
 ) -> LlmToolContext:
     results = [
+        kb_get_repo_surfaces(analysis),
+        kb_get_entry_candidates(analysis),
+        kb_get_module_map(analysis),
+        kb_get_reading_path(analysis),
+        kb_get_evidence(
+            analysis,
+            target=(topic_slice[0].summary if topic_slice and topic_slice[0].summary else None),
+        ),
         _repository_context_result(repository),
         _file_tree_summary_result(file_tree),
         _relevant_files_result(file_tree),
@@ -397,7 +451,9 @@ def _relevant_files_result(file_tree: FileTreeSnapshot, limit: int = 80) -> LlmT
         and node.status == FileNodeStatus.NORMAL
         and (node.is_source_file or _is_repo_doc(node.relative_path))
     ]
-    nodes.sort(key=lambda item: (not _is_repo_doc(item.relative_path), item.depth, item.relative_path))
+    nodes.sort(
+        key=lambda item: (not _is_repo_doc(item.relative_path), item.depth, item.relative_path)
+    )
     return _tool_result(
         "m2.list_relevant_files",
         "m2_file_tree",
@@ -448,10 +504,7 @@ def _dependency_map_result(analysis: AnalysisBundle) -> LlmToolResult:
         "m3.get_dependency_map",
         "m3_analysis.import_analyzer",
         f"依赖分类共 {len(analysis.import_classifications)} 项。",
-        {
-            key: values[:30]
-            for key, values in sorted(grouped.items(), key=lambda pair: pair[0])
-        },
+        {key: values[:30] for key, values in sorted(grouped.items(), key=lambda pair: pair[0])},
         generated_at=analysis.generated_at,
     )
 

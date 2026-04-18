@@ -228,10 +228,11 @@ def _tool_calling_guidance(input_data: PromptBuildInput) -> str:
         return ""
     return (
         "工具调用说明:\n"
-        "- 本轮你可以调用 read_file_excerpt 和 search_text 两个工具按需查看仓库源码。\n"
+        "- 本轮优先使用 get_repo_surfaces、get_entry_candidates、get_module_map、get_reading_path、get_evidence 这些教学型工具。\n"
+        "- 只有在高层工具还不足以解释用户问题时，再调用 read_file_excerpt 或 search_text 查看具体代码。\n"
         "- 仅在已有工具结果不足以回答用户问题时才调用工具，不要为了调用而调用。\n"
         "- 调用工具后，用工具返回的实际内容来支撑你的讲解，不要编造代码细节。\n"
-        "- 每轮最多调用 2-3 次工具，优先查看用户追问最直接相关的文件。\n"
+        "- 每轮最多调用 2-3 次工具，先决定教学主线，再补代码证据。\n"
         "- 工具结果中的 [redacted_secret] 是脱敏标记，不要对其内容进行猜测。"
     )
 

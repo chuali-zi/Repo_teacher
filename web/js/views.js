@@ -124,6 +124,20 @@ function handleSseEvent(kind, evt) {
       report({ source: "analysis", level: "warn", message: `降级：${evt.degradation.user_notice}`, where: evt.degradation.type });
       break;
 
+    case "agent_activity": {
+      setState((s) => ({
+        activeAgentActivity: evt.activity,
+        activityHistory: [evt.activity, ...(s.activityHistory || []).filter((item) => item.activity_id !== evt.activity.activity_id)].slice(0, 6),
+      }));
+      bus.emit("agent:activity", { activity: evt.activity });
+      if (evt.activity.phase.includes("tool") || evt.activity.tool_name) bus.emit("tool:activity", { activity: evt.activity });
+      if (evt.activity.phase === "tool_running") bus.emit("tool:start", { activity: evt.activity });
+      if (evt.activity.phase === "tool_succeeded") bus.emit("tool:end", { activity: evt.activity });
+      if (evt.activity.phase === "tool_failed") bus.emit("tool:fail", { activity: evt.activity });
+      if (evt.activity.phase === "degraded_continue") bus.emit("tool:degrade", { activity: evt.activity });
+      break;
+    }
+
     case "answer_stream_start": {
       // synthesize a temporary message
       const placeholder = {
@@ -170,7 +184,7 @@ function handleSseEvent(kind, evt) {
     case "message_completed":
       // Replace placeholder with full structured message
       appendMessage({ ...evt.message, _streaming: false });
-      setState({ status: evt.status, subStatus: evt.sub_status, view: evt.view });
+      setState({ status: evt.status, subStatus: evt.sub_status, view: evt.view, activeAgentActivity: null });
       bus.emit("message:append", evt.message);
       // close stream after initial report
       if (evt.message.message_type === "initial_report") {
@@ -185,7 +199,7 @@ function handleSseEvent(kind, evt) {
       break;
 
     case "error":
-      setState({ status: evt.status, subStatus: evt.sub_status, view: evt.view, activeError: evt.error });
+      setState({ status: evt.status, subStatus: evt.sub_status, view: evt.view, activeError: evt.error, activeAgentActivity: null });
       report({ source: kind, level: "error", message: `${evt.error.error_code}: ${evt.error.message}`, where: `stage=${evt.error.stage}`, raw: evt.error });
       bus.emit("error:user", evt.error);
       // close failed stream
@@ -232,6 +246,20 @@ function renderSidebar(state) {
     }
   } else {
     degPanel.hidden = true;
+  }
+
+  const activityPanel = $("#agent-activity-panel");
+  const activityCurrent = $("#agent-activity-current");
+  const activityHistory = $("#agent-activity-history");
+  const hasActivity = !!state.activeAgentActivity || (state.activityHistory && state.activityHistory.length > 0);
+  if (hasActivity && activityPanel) {
+    activityPanel.hidden = false;
+    clear(activityCurrent);
+    clear(activityHistory);
+    if (state.activeAgentActivity) activityCurrent.appendChild(renderAgentActivityCard(state.activeAgentActivity, { current: true }));
+    for (const item of state.activityHistory || []) activityHistory.appendChild(renderAgentActivityRow(item));
+  } else if (activityPanel) {
+    activityPanel.hidden = true;
   }
 }
 
@@ -435,6 +463,8 @@ function renderInputView(state) {
         ],
         degradationNotices: [],
         messages: [],
+        activeAgentActivity: null,
+        activityHistory: [],
       });
     } catch (err) {
       const message = (err.payload && err.payload.message) || err.message || "提交失败";
@@ -495,6 +525,7 @@ function defaultSteps() {
 function renderChatView(state) {
   const root = clone("tmpl-chat-view");
   const thread = $("#thread", root);
+  if (state.activeAgentActivity && state.subStatus !== "waiting_user") thread.appendChild(renderActivityBanner(state.activeAgentActivity));
   for (const msg of state.messages) thread.appendChild(renderMessage(msg));
   if (state.subStatus === "agent_thinking") thread.appendChild(renderThinking());
   return root;
@@ -508,6 +539,15 @@ function updateThread(state) {
   const present = new Map();
   for (const node of Array.from(thread.children)) {
     if (node.dataset && node.dataset.msgId) present.set(node.dataset.msgId, node);
+  }
+
+  const existingBanner = thread.querySelector(".activity-banner");
+  if (state.activeAgentActivity && state.subStatus !== "waiting_user") {
+    const freshBanner = renderActivityBanner(state.activeAgentActivity);
+    if (existingBanner) existingBanner.replaceWith(freshBanner);
+    else thread.insertBefore(freshBanner, thread.firstChild);
+  } else if (existingBanner) {
+    existingBanner.remove();
   }
 
   const seen = new Set();
@@ -556,7 +596,7 @@ function updateThread(state) {
 function renderThinking() {
   return el("div", { class: "thinking-row", dataset: { msgId: "__thinking__" } },
     el("div", { class: "thinking" },
-      "Agent 正在思考",
+      currentActivityLabel(getState().activeAgentActivity) || "Agent 正在思考",
       el("span", { class: "thinking__dots" },
         el("span"), el("span"), el("span"),
       ),
@@ -574,19 +614,112 @@ function renderMessage(msg) {
   } else if (msg._streaming || (!msg.streaming_complete && !msg.structured_content && !msg.initial_report_content)) {
     // streaming: just show the live text, will be replaced when message_completed arrives
     wrap.appendChild(el("pre", { class: "bubble bubble--stream", dataset: { streamId: msg.message_id } }, msg.raw_text || ""));
-  } else if (msg.message_type === "initial_report" && msg.initial_report_content && !shouldPreferRawInitialReport(msg)) {
-    wrap.appendChild(renderInitialReport(msg));
-  } else if (msg.structured_content && !shouldPreferRawAnswer(msg)) {
-    wrap.appendChild(renderStructuredAnswer(msg));
   } else {
     wrap.appendChild(renderRawMessage(msg));
+    const suggestions = collectMessageSuggestions(msg);
+    if (suggestions.length) wrap.appendChild(renderSuggestions(suggestions));
   }
   bus.emit("message:render", { msg, root: wrap });
   return wrap;
 }
 
+function renderActivityBanner(activity) {
+  return el("div", { class: "activity-banner" }, renderAgentActivityCard(activity, { current: true }));
+}
+
+function renderAgentActivityCard(activity, { current = false } = {}) {
+  const card = el("div", { class: `agent-activity-card${current ? " is-current" : ""}`, dataset: { phase: activity.phase } });
+  card.appendChild(el("div", { class: "agent-activity-card__shine" }));
+  card.appendChild(el("div", { class: "agent-activity-card__title" }, currentActivityLabel(activity)));
+  card.appendChild(el("div", { class: "agent-activity-card__summary" }, activity.summary || "正在处理中"));
+  if (activity.tool_name || activity.elapsed_ms != null) {
+    const meta = [];
+    if (activity.tool_name) meta.push(formatToolLabel(activity.tool_name, activity.tool_arguments || {}));
+    const target = formatToolTarget(activity.tool_name, activity.tool_arguments || {});
+    if (target) meta.push(target);
+    if (activity.elapsed_ms != null) meta.push(`${(activity.elapsed_ms / 1000).toFixed(1)}s`);
+    card.appendChild(el("div", { class: "agent-activity-card__meta" }, meta.join(" · ")));
+  }
+  return card;
+}
+
+function renderAgentActivityRow(activity) {
+  return el("li", { class: "activity-row", dataset: { phase: activity.phase } },
+    el("span", { class: "activity-row__phase" }, currentActivityLabel(activity)),
+    el("span", { class: "activity-row__summary" }, activity.summary || ""),
+  );
+}
+
+function currentActivityLabel(activity) {
+  if (!activity) return "";
+  switch (activity.phase) {
+    case "thinking": return "正在思考";
+    case "planning_tool_call": return "正在规划取证";
+    case "tool_running": return "正在调用工具";
+    case "tool_succeeded": return "工具已返回";
+    case "tool_failed": return "工具失败";
+    case "degraded_continue": return "保守降级中";
+    case "waiting_llm_after_tool": return "正在组织回答";
+    case "slow_warning": return "仍在处理中";
+    default: return activity.phase;
+  }
+}
+
+function formatToolLabel(toolName, args = {}) {
+  switch (toolName) {
+    case "get_repo_surfaces": return "仓库分区";
+    case "get_entry_candidates": return "入口候选";
+    case "get_module_map": return "模块地图";
+    case "get_reading_path": return "阅读路径";
+    case "get_evidence": return "证据检索";
+    case "read_file_excerpt": return "代码摘录";
+    case "search_text": return "文本搜索";
+    default: return toolName || "工具调用";
+  }
+}
+
+function formatToolTarget(toolName, args = {}) {
+  switch (toolName) {
+    case "get_repo_surfaces":
+    case "get_entry_candidates":
+    case "get_module_map":
+      return args.mode ? `${args.mode} mode` : "";
+    case "get_reading_path":
+      return args.goal || args.mode || "";
+    case "get_evidence":
+      return args.target || (Array.isArray(args.evidence_ids) && args.evidence_ids.length ? `${args.evidence_ids.length} refs` : "");
+    case "read_file_excerpt":
+      return args.relative_path || "";
+    case "search_text":
+      return args.query || "";
+    default:
+      return "";
+  }
+}
+
 function renderRawMessage(msg) {
   return el("div", { class: "bubble bubble--raw" }, renderMarkdown(msg.raw_text || "(无内容)"));
+}
+
+function collectMessageSuggestions(msg) {
+  const sources = [
+    msg.suggestions,
+    msg.initial_report_content?.suggested_next_questions,
+    msg.structured_content?.next_steps,
+  ];
+  const suggestions = [];
+  const seen = new Set();
+  for (const source of sources) {
+    if (!Array.isArray(source)) continue;
+    for (const item of source) {
+      const text = (item?.text || "").trim();
+      if (!text || seen.has(text)) continue;
+      seen.add(text);
+      suggestions.push(item);
+      if (suggestions.length >= 3) return suggestions;
+    }
+  }
+  return suggestions;
 }
 
 function renderMessageHead(msg) {
@@ -655,33 +788,6 @@ function renderStructuredAnswer(msg) {
   }
   wrap.appendChild(inner);
   return wrap;
-}
-
-function shouldPreferRawInitialReport(msg) {
-  const c = msg.initial_report_content;
-  if (!c) return true;
-  const hasRichStructure = Boolean(
-    c.focus_points?.length
-    || c.repo_mapping?.length
-    || c.key_directories?.length
-    || c.entry_section?.entries?.length
-    || c.reading_path_preview?.length
-    || c.unknown_section?.length
-  );
-  const usesFallbackStep = c.recommended_first_step?.target === "先查看 README 或主入口文件";
-  return !hasRichStructure && !!msg.raw_text && usesFallbackStep;
-}
-
-function shouldPreferRawAnswer(msg) {
-  const sc = msg.structured_content;
-  if (!sc || !msg.raw_text) return true;
-  const hasExplicitSections = /(^|\n)#{1,6}\s*(本轮重点|直接解释|与整体的关系|证据|不确定项|下一步建议)\s*\n/.test(msg.raw_text);
-  const fallbackRelation = (sc.relation_to_overall || "").includes("需要结合仓库整体结构继续确认");
-  const fallbackEvidence = Array.isArray(sc.evidence_lines)
-    && sc.evidence_lines.length === 1
-    && (sc.evidence_lines[0]?.confidence || "") === "unknown"
-    && !(sc.evidence_lines[0]?.evidence_refs || []).length;
-  return !hasExplicitSections && fallbackRelation && fallbackEvidence;
 }
 
 function renderMarkdown(text) {
@@ -837,14 +943,28 @@ async function sendMessageNow(text) {
     streaming_complete: true,
     error_state: null,
   });
-  setState({ subStatus: "agent_thinking" });
+  setState({
+    subStatus: "agent_thinking",
+    activeAgentActivity: {
+      activity_id: `local-act-${Date.now()}`,
+      phase: "thinking",
+      summary: "正在理解你的问题",
+      tool_name: null,
+      tool_arguments: {},
+      round_index: null,
+      elapsed_ms: null,
+      soft_timed_out: false,
+      failed: false,
+      retryable: false,
+    },
+  });
   try {
     await api.sendMessage(st.sessionId, text);
     // Open chat stream now (renderer will too on next tick — duplicate-safe because of guard)
     if (!chatStreamCloser) chatStreamCloser = openStream("chat", st.sessionId, (evt) => handleSseEvent("chat", evt));
   } catch (err) {
     report({ source: "ui", level: "error", message: "发送消息失败", where: "sendMessageNow", error: err });
-    setState({ subStatus: "waiting_user" });
+    setState({ subStatus: "waiting_user", activeAgentActivity: null });
   }
 }
 

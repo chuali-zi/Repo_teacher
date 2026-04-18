@@ -6,6 +6,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from backend.contracts.enums import (
+    AgentActivityPhase,
     AnalysisMode,
     CleanupStatus,
     ConfidenceLevel,
@@ -13,6 +14,7 @@ from backend.contracts.enums import (
     DegradationType,
     DepthLevel,
     DerivedStatus,
+    EntryRole,
     EntryTargetType,
     ErrorCode,
     EvidenceType,
@@ -33,6 +35,7 @@ from backend.contracts.enums import (
     ProjectType,
     PromptScenario,
     ReadingTargetType,
+    RepoSurface,
     RepoSizeLevel,
     RepoSourceType,
     RuntimeEventType,
@@ -51,7 +54,9 @@ from backend.contracts.enums import (
 
 
 class ContractModel(BaseModel):
-    model_config = ConfigDict(use_enum_values=True, populate_by_name=True, arbitrary_types_allowed=True)
+    model_config = ConfigDict(
+        use_enum_values=True, populate_by_name=True, arbitrary_types_allowed=True
+    )
 
 
 class ProgressStepStateItem(ContractModel):
@@ -183,6 +188,9 @@ class EntryCandidate(ContractModel):
     reason: str
     confidence: ConfidenceLevel
     rank: int
+    score: float | None = None
+    surface: RepoSurface | None = None
+    entry_role: EntryRole = EntryRole.UNCERTAIN
     evidence_refs: list[str] = Field(default_factory=list)
     unknown_items: list[UnknownItem] = Field(default_factory=list)
 
@@ -203,6 +211,7 @@ class ModuleSummary(ContractModel):
     module_id: str
     path: str
     module_kind: ModuleKind
+    surface: RepoSurface | None = None
     responsibility: str | None = None
     importance_rank: int | None = None
     likely_layer: LayerType | None = None
@@ -288,6 +297,47 @@ class AnalysisWarning(ContractModel):
     related_paths: list[str] = Field(default_factory=list)
 
 
+class RepoSurfaceAssignment(ContractModel):
+    assignment_id: str
+    path: str
+    surface: RepoSurface
+    reason: str
+    depth: int
+
+
+class KnowledgeObservation(ContractModel):
+    observation_id: str
+    kind: str
+    path: str | None = None
+    summary: str
+    surface: RepoSurface | None = None
+    evidence_refs: list[str] = Field(default_factory=list)
+
+
+class KnowledgeCandidate(ContractModel):
+    candidate_id: str
+    candidate_type: str
+    target_id: str | None = None
+    title: str
+    summary: str
+    score: float
+    confidence: ConfidenceLevel
+    surface: RepoSurface | None = None
+    visibility_modes: list[str] = Field(default_factory=list)
+    evidence_refs: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class RepositoryKnowledgeBase(ContractModel):
+    kb_id: str
+    repo_id: str
+    generated_at: datetime
+    observations: list[KnowledgeObservation] = Field(default_factory=list)
+    candidates: list[KnowledgeCandidate] = Field(default_factory=list)
+    surfaces: list[RepoSurfaceAssignment] = Field(default_factory=list)
+    teaching_notes: list[str] = Field(default_factory=list)
+
+
 class AnalysisBundle(ContractModel):
     bundle_id: str
     repo_id: str
@@ -304,6 +354,7 @@ class AnalysisBundle(ContractModel):
     evidence_catalog: list[EvidenceRef] = Field(default_factory=list)
     unknown_items: list[UnknownItem] = Field(default_factory=list)
     warnings: list[AnalysisWarning] = Field(default_factory=list)
+    knowledge_base: RepositoryKnowledgeBase | None = None
 
 
 class TopicRef(ContractModel):
@@ -506,11 +557,15 @@ class MessageRecord(ContractModel):
         else:
             if self.initial_report_content is not None:
                 raise ValueError("non-initial-report messages must omit initial_report_content")
-            if self.message_type in {
-                MessageType.AGENT_ANSWER,
-                MessageType.GOAL_SWITCH_CONFIRMATION,
-                MessageType.STAGE_SUMMARY,
-            } and self.structured_content is None:
+            if (
+                self.message_type
+                in {
+                    MessageType.AGENT_ANSWER,
+                    MessageType.GOAL_SWITCH_CONFIRMATION,
+                    MessageType.STAGE_SUMMARY,
+                }
+                and self.structured_content is None
+            ):
                 raise ValueError("structured agent messages must include structured_content")
         if self.role == MessageRole.USER:
             if self.structured_content is not None or self.initial_report_content is not None:
@@ -702,6 +757,19 @@ class DegradationFlag(ContractModel):
     related_paths: list[str] = Field(default_factory=list)
 
 
+class AgentActivity(ContractModel):
+    activity_id: str
+    phase: AgentActivityPhase
+    summary: str
+    tool_name: str | None = None
+    tool_arguments: dict[str, Any] = Field(default_factory=dict)
+    round_index: int | None = None
+    elapsed_ms: int | None = None
+    soft_timed_out: bool = False
+    failed: bool = False
+    retryable: bool = False
+
+
 class RuntimeEvent(ContractModel):
     event_id: str
     session_id: str
@@ -717,6 +785,7 @@ class RuntimeEvent(ContractModel):
     user_notice: str | None = None
     error: UserFacingError | None = None
     degradation: DegradationFlag | None = None
+    activity: AgentActivity | None = None
     payload: dict[str, Any] | None = None
 
 
@@ -733,21 +802,32 @@ class SessionContext(ContractModel):
     last_error: UserFacingError | None = None
     progress_steps: list[ProgressStepStateItem] = Field(default_factory=list)
     active_degradations: list[DegradationFlag] = Field(default_factory=list)
+    active_agent_activity: AgentActivity | None = None
     runtime_events: list[RuntimeEvent] = Field(default_factory=list)
     temp_resources: TempResourceSet | None = None
 
     @model_validator(mode="after")
     def validate_session_shape(self) -> SessionContext:
         if self.status == SessionStatus.IDLE:
-            if any(item is not None for item in (self.repository, self.file_tree, self.analysis, self.teaching_skeleton)):
+            if any(
+                item is not None
+                for item in (self.repository, self.file_tree, self.analysis, self.teaching_skeleton)
+            ):
                 raise ValueError("idle sessions must not retain repository analysis state")
             if self.progress_steps:
                 raise ValueError("idle sessions must have empty progress_steps")
         if self.status == SessionStatus.CHATTING:
-            if any(item is None for item in (self.repository, self.file_tree, self.analysis, self.teaching_skeleton)):
-                raise ValueError("chatting sessions must include repository, file_tree, analysis, and teaching_skeleton")
+            if any(
+                item is None
+                for item in (self.repository, self.file_tree, self.analysis, self.teaching_skeleton)
+            ):
+                raise ValueError(
+                    "chatting sessions must include repository, file_tree, analysis, and teaching_skeleton"
+                )
         elif self.conversation.sub_status is not None:
-            raise ValueError("conversation sub_status is only valid while session status is chatting")
+            raise ValueError(
+                "conversation sub_status is only valid while session status is chatting"
+            )
         return self
 
 

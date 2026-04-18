@@ -32,8 +32,8 @@ from backend.contracts.enums import (
     PromptScenario,
 )
 
-_JSON_BLOCK_RE = re.compile(r"<json_output>\s*(\{.*\})\s*</json_output>", re.DOTALL)
-_JSON_FENCE_RE = re.compile(r"```json\s*(\{.*\})\s*```", re.DOTALL)
+_JSON_BLOCK_RE = re.compile(r"<json_output>\s*([\s\S]*?)\s*</json_output>", re.IGNORECASE)
+_JSON_FENCE_RE = re.compile(r"```(?:json|json_output)\s*([\s\S]*?)```", re.IGNORECASE)
 
 _SECTION_PATTERNS: tuple[tuple[str, str], ...] = (
     ("focus", r"(?:^|\n)#{1,6}\s*本轮重点\s*\n"),
@@ -86,9 +86,10 @@ def _extract_payload(raw_text: str) -> tuple[str, dict]:
         payload_text = match.group(1)
         visible_text = pattern.sub("", raw_text).strip()
         try:
-            return visible_text, json.loads(payload_text)
+            payload = json.loads(payload_text.strip())
         except json.JSONDecodeError:
             return visible_text, {}
+        return visible_text, payload if isinstance(payload, dict) else {}
     return raw_text.strip(), {}
 
 

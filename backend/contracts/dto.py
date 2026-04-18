@@ -7,6 +7,7 @@ from pydantic import Field, model_validator
 
 from backend.contracts.domain import ContractModel, ProgressStepStateItem, UserFacingError
 from backend.contracts.enums import (
+    AgentActivityPhase,
     ClientView,
     ConfidenceLevel,
     ConversationSubStatus,
@@ -236,11 +237,15 @@ class MessageDto(ContractModel):
         else:
             if self.initial_report_content is not None:
                 raise ValueError("non-initial-report messages must omit initial_report_content")
-            if self.message_type in {
-                MessageType.AGENT_ANSWER,
-                MessageType.GOAL_SWITCH_CONFIRMATION,
-                MessageType.STAGE_SUMMARY,
-            } and self.structured_content is None:
+            if (
+                self.message_type
+                in {
+                    MessageType.AGENT_ANSWER,
+                    MessageType.GOAL_SWITCH_CONFIRMATION,
+                    MessageType.STAGE_SUMMARY,
+                }
+                and self.structured_content is None
+            ):
                 raise ValueError("structured agent messages must include structured_content")
         if self.role == MessageRole.USER:
             if self.structured_content is not None or self.initial_report_content is not None:
@@ -265,6 +270,7 @@ class SessionSnapshotDto(ContractModel):
     progress_steps: list[ProgressStepStateItem] = Field(default_factory=list)
     degradation_notices: list[DegradationFlagDto] = Field(default_factory=list)
     messages: list[MessageDto] = Field(default_factory=list)
+    active_agent_activity: AgentActivityDto | None = None
     active_error: UserFacingErrorDto | None = None
 
 
@@ -326,6 +332,24 @@ class DegradationNoticeEvent(SseEventDto):
     degradation: DegradationFlagDto
 
 
+class AgentActivityDto(ContractModel):
+    activity_id: str
+    phase: AgentActivityPhase
+    summary: str
+    tool_name: str | None = None
+    tool_arguments: dict[str, Any] = Field(default_factory=dict)
+    round_index: int | None = None
+    elapsed_ms: int | None = None
+    soft_timed_out: bool = False
+    failed: bool = False
+    retryable: bool = False
+
+
+class AgentActivityEvent(SseEventDto):
+    event_type: Literal[RuntimeEventType.AGENT_ACTIVITY]
+    activity: AgentActivityDto
+
+
 class AnswerStreamStartEvent(SseEventDto):
     event_type: Literal[RuntimeEventType.ANSWER_STREAM_START]
     message_id: str
@@ -364,6 +388,7 @@ AnalysisSseEvent = (
     StatusChangedEvent
     | AnalysisProgressEvent
     | DegradationNoticeEvent
+    | AgentActivityEvent
     | AnswerStreamStartEvent
     | AnswerStreamDeltaEvent
     | AnswerStreamEndEvent
@@ -373,6 +398,7 @@ AnalysisSseEvent = (
 
 ChatSseEvent = (
     StatusChangedEvent
+    | AgentActivityEvent
     | AnswerStreamStartEvent
     | AnswerStreamDeltaEvent
     | AnswerStreamEndEvent
@@ -381,11 +407,17 @@ ChatSseEvent = (
 )
 
 
-def success_envelope(session_id: str | None, data: ContractModel | dict[str, Any]) -> dict[str, Any]:
+def success_envelope(
+    session_id: str | None, data: ContractModel | dict[str, Any]
+) -> dict[str, Any]:
     payload = data.model_dump(mode="json") if isinstance(data, ContractModel) else data
     return {"ok": True, "session_id": session_id, "data": payload}
 
 
-def error_envelope(session_id: str | None, error: UserFacingError | UserFacingErrorDto) -> dict[str, Any]:
-    public_error = error if isinstance(error, UserFacingErrorDto) else UserFacingErrorDto.from_domain(error)
+def error_envelope(
+    session_id: str | None, error: UserFacingError | UserFacingErrorDto
+) -> dict[str, Any]:
+    public_error = (
+        error if isinstance(error, UserFacingErrorDto) else UserFacingErrorDto.from_domain(error)
+    )
     return {"ok": False, "session_id": session_id, "error": public_error.model_dump(mode="json")}

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from backend.contracts.domain import MessageRecord, RuntimeEvent
 from backend.contracts.dto import (
+    AgentActivityDto,
+    AgentActivityEvent,
     AnalysisProgressEvent,
     AnswerStreamDeltaEvent,
     AnswerStreamEndEvent,
@@ -60,6 +62,16 @@ def runtime_event_to_sse(event: RuntimeEvent) -> SseEventDto:
                 user_notice=degradation.user_notice,
                 related_paths=degradation.related_paths,
             ),
+        )
+
+    if event.event_type == RuntimeEventType.AGENT_ACTIVITY:
+        activity = event.activity
+        return AgentActivityEvent(
+            event_id=event.event_id,
+            event_type=event.event_type,
+            session_id=event.session_id,
+            occurred_at=event.occurred_at,
+            activity=AgentActivityDto.model_validate(activity.model_dump(mode="python")),
         )
 
     if event.event_type == RuntimeEventType.ANSWER_STREAM_START:
@@ -128,15 +140,22 @@ def _message_dto(message: MessageRecord) -> MessageDto:
         created_at=message.created_at,
         raw_text=message.raw_text,
         structured_content=(
-            StructuredMessageContentDto.model_validate(message.structured_content.model_dump(mode="python"))
+            StructuredMessageContentDto.model_validate(
+                message.structured_content.model_dump(mode="python")
+            )
             if message.structured_content
             else None
         ),
         initial_report_content=(
-            message.initial_report_content.model_dump(mode="python") if message.initial_report_content else None
+            message.initial_report_content.model_dump(mode="python")
+            if message.initial_report_content
+            else None
         ),
         related_goal=message.related_goal,
-        suggestions=[SuggestionDto.model_validate(item.model_dump(mode="python")) for item in message.suggestions],
+        suggestions=[
+            SuggestionDto.model_validate(item.model_dump(mode="python"))
+            for item in message.suggestions
+        ],
         streaming_complete=message.streaming_complete,
         error_state=(
             MessageErrorStateDto(

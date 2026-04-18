@@ -40,6 +40,7 @@ def test_get_session_without_active_session_returns_idle_snapshot() -> None:
             "progress_steps": [],
             "degradation_notices": [],
             "messages": [],
+            "active_agent_activity": None,
             "active_error": None,
         },
     }

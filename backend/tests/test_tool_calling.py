@@ -23,7 +23,8 @@ from backend.contracts.enums import (
 from backend.m2_file_tree.tree_scanner import scan_repository_tree
 from backend.m3_analysis import run_static_analysis
 from backend.m4_skeleton import assemble_teaching_skeleton
-from backend.m6_response.answer_generator import stream_answer_text_with_tools
+from backend.m6_response import answer_generator
+from backend.m6_response.answer_generator import ToolLoopTimeouts, stream_answer_text_with_tools
 from backend.m6_response.llm_caller import StreamResult, ToolCallRequest
 from backend.m6_response.prompt_builder import build_messages
 from backend.m6_response.tool_executor import TOOL_SCHEMAS, execute_tool_call
@@ -78,9 +79,17 @@ def _prompt_input(skeleton, conversation, *, enable_tools: bool = True) -> Promp
 
 class TestToolSchemas:
     def test_tool_schemas_have_required_structure(self) -> None:
-        assert len(TOOL_SCHEMAS) == 2
+        assert len(TOOL_SCHEMAS) == 7
         names = {schema["function"]["name"] for schema in TOOL_SCHEMAS}
-        assert names == {"read_file_excerpt", "search_text"}
+        assert names == {
+            "get_repo_surfaces",
+            "get_entry_candidates",
+            "get_module_map",
+            "get_reading_path",
+            "get_evidence",
+            "read_file_excerpt",
+            "search_text",
+        }
 
     def test_read_file_excerpt_schema_has_required_fields(self) -> None:
         schema = next(s for s in TOOL_SCHEMAS if s["function"]["name"] == "read_file_excerpt")
@@ -128,7 +137,9 @@ class TestToolExecutor:
         assert result["available"] is False
 
     def test_execute_search_text_finds_matches(self, tmp_path: Path) -> None:
-        (tmp_path / "app.py").write_text("from flask import Flask\napp = Flask(__name__)\n", encoding="utf-8")
+        (tmp_path / "app.py").write_text(
+            "from flask import Flask\napp = Flask(__name__)\n", encoding="utf-8"
+        )
         repo = _repository(tmp_path)
         file_tree = scan_repository_tree(repo)
 
@@ -195,8 +206,10 @@ class TestStreamAnswerWithTools:
         conversation = ConversationState(current_repo_id=repo.repo_id)
         prompt_input = _prompt_input(skeleton, conversation)
 
-        async def fake_tool_streamer(messages, *, tools=None, on_content_delta=None, temperature=0.6):
-            text = "## 本轮重点\n直接回答。\n<json_output>{\"focus\":\"直接\"}</json_output>"
+        async def fake_tool_streamer(
+            messages, *, tools=None, on_content_delta=None, temperature=0.6
+        ):
+            text = '## 本轮重点\n直接回答。\n<json_output>{"focus":"直接"}</json_output>'
             if on_content_delta:
                 await on_content_delta(text)
             return StreamResult(content_chunks=[text], finish_reason="stop")
@@ -226,7 +239,9 @@ class TestStreamAnswerWithTools:
 
         call_count = 0
 
-        async def fake_tool_streamer(messages, *, tools=None, on_content_delta=None, temperature=0.6):
+        async def fake_tool_streamer(
+            messages, *, tools=None, on_content_delta=None, temperature=0.6
+        ):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -241,7 +256,7 @@ class TestStreamAnswerWithTools:
                     ],
                     finish_reason="tool_calls",
                 )
-            text = "## 本轮重点\n看了 main.py 后的回答。\n<json_output>{\"focus\":\"main.py\"}</json_output>"
+            text = '## 本轮重点\n看了 main.py 后的回答。\n<json_output>{"focus":"main.py"}</json_output>'
             if on_content_delta:
                 await on_content_delta(text)
             return StreamResult(content_chunks=[text], finish_reason="stop")
@@ -273,7 +288,9 @@ class TestStreamAnswerWithTools:
 
         call_count = 0
 
-        async def always_call_tools(messages, *, tools=None, on_content_delta=None, temperature=0.6):
+        async def always_call_tools(
+            messages, *, tools=None, on_content_delta=None, temperature=0.6
+        ):
             nonlocal call_count
             call_count += 1
             return StreamResult(
@@ -316,7 +333,9 @@ class TestStreamAnswerWithTools:
 
         call_count = 0
 
-        async def multi_tool_streamer(messages, *, tools=None, on_content_delta=None, temperature=0.6):
+        async def multi_tool_streamer(
+            messages, *, tools=None, on_content_delta=None, temperature=0.6
+        ):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -362,3 +381,123 @@ class TestStreamAnswerWithTools:
         result = asyncio.run(collect())
         assert call_count == 3
         assert "UserService" in result
+
+    def test_tool_activity_events_are_emitted(self, tmp_path: Path) -> None:
+        (tmp_path / "main.py").write_text("def run():\n    pass\n", encoding="utf-8")
+        repo = _repository(tmp_path)
+        file_tree = scan_repository_tree(repo)
+        analysis = run_static_analysis(repo, file_tree)
+        skeleton = assemble_teaching_skeleton(analysis)
+        conversation = ConversationState(current_repo_id=repo.repo_id)
+        prompt_input = _prompt_input(skeleton, conversation)
+        activities: list[dict[str, object]] = []
+        call_count = 0
+
+        async def fake_tool_streamer(
+            messages, *, tools=None, on_content_delta=None, temperature=0.6
+        ):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return StreamResult(
+                    content_chunks=[],
+                    tool_calls=[
+                        ToolCallRequest(
+                            call_id="call_001",
+                            function_name="read_file_excerpt",
+                            arguments_json=json.dumps({"relative_path": "main.py"}),
+                        )
+                    ],
+                    finish_reason="tool_calls",
+                )
+            text = '## 本轮重点\n看了 main.py 后的回答。\n<json_output>{"focus":"main.py"}</json_output>'
+            if on_content_delta:
+                await on_content_delta(text)
+            return StreamResult(content_chunks=[text], finish_reason="stop")
+
+        async def collect():
+            chunks = []
+            async for chunk in stream_answer_text_with_tools(
+                prompt_input,
+                repository=repo,
+                file_tree=file_tree,
+                tool_streamer=fake_tool_streamer,
+                on_activity=lambda **payload: activities.append(payload),
+            ):
+                chunks.append(chunk)
+            return "".join(chunks)
+
+        result = asyncio.run(collect())
+        phases = [item["phase"] for item in activities]
+        assert "planning_tool_call" in phases
+        assert "tool_running" in phases
+        assert "tool_succeeded" in phases
+        assert "waiting_llm_after_tool" in phases
+        assert "main.py" in result
+
+    def test_tool_timeout_degrades_instead_of_failing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / "service.py").write_text("def slow():\n    return True\n", encoding="utf-8")
+        repo = _repository(tmp_path)
+        file_tree = scan_repository_tree(repo)
+        analysis = run_static_analysis(repo, file_tree)
+        skeleton = assemble_teaching_skeleton(analysis)
+        conversation = ConversationState(current_repo_id=repo.repo_id)
+        prompt_input = _prompt_input(skeleton, conversation)
+        activities: list[dict[str, object]] = []
+        call_count = 0
+
+        def slow_execute_tool_call(*args, **kwargs):
+            import time
+
+            time.sleep(0.05)
+            return json.dumps({"tool_name": "read_file_excerpt", "available": True})
+
+        monkeypatch.setattr(answer_generator, "execute_tool_call", slow_execute_tool_call)
+
+        async def fake_tool_streamer(
+            messages, *, tools=None, on_content_delta=None, temperature=0.6
+        ):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return StreamResult(
+                    content_chunks=[],
+                    tool_calls=[
+                        ToolCallRequest(
+                            call_id="call_slow",
+                            function_name="read_file_excerpt",
+                            arguments_json=json.dumps({"relative_path": "service.py"}),
+                        )
+                    ],
+                    finish_reason="tool_calls",
+                )
+            text = '## 本轮重点\n工具超时后仍继续回答。\n<json_output>{"focus":"degraded"}</json_output>'
+            if on_content_delta:
+                await on_content_delta(text)
+            return StreamResult(content_chunks=[text], finish_reason="stop")
+
+        async def collect():
+            chunks = []
+            async for chunk in stream_answer_text_with_tools(
+                prompt_input,
+                repository=repo,
+                file_tree=file_tree,
+                tool_streamer=fake_tool_streamer,
+                on_activity=lambda **payload: activities.append(payload),
+                timeouts=ToolLoopTimeouts(
+                    thinking_notice_seconds=0.001,
+                    code_search_notice_seconds=0.002,
+                    tool_soft_timeout_seconds=0.01,
+                    tool_hard_timeout_seconds=0.02,
+                ),
+            ):
+                chunks.append(chunk)
+            return "".join(chunks)
+
+        result = asyncio.run(collect())
+        phases = [item["phase"] for item in activities]
+        assert "tool_failed" in phases
+        assert "degraded_continue" in phases
+        assert "仍继续回答" in result

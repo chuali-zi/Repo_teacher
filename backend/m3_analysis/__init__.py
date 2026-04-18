@@ -14,16 +14,22 @@ from backend.contracts.domain import (
     AnalysisWarning,
     EvidenceRef,
     FileTreeSnapshot,
+    KnowledgeCandidate,
+    KnowledgeObservation,
     LayerViewResult,
     ProjectProfileResult,
+    RepoSurfaceAssignment,
+    RepositoryKnowledgeBase,
     RepositoryContext,
 )
 from backend.contracts.enums import (
     AnalysisMode,
     DerivedStatus,
+    EntryRole,
     EvidenceType,
     ImportSourceType,
     LayerType,
+    RepoSurface,
     UnknownTopic,
     WarningType,
 )
@@ -35,6 +41,7 @@ from backend.m3_analysis.layer_inferrer import infer_layers
 from backend.m3_analysis.module_identifier import identify_modules
 from backend.m3_analysis.project_profiler import profile_project
 from backend.m3_analysis.reading_path_builder import build_reading_path
+from backend.m3_analysis.surface_classifier import classify_repo_surfaces
 from backend.m3_analysis._helpers import (
     dedupe_by_id,
     extract_declared_dependencies,
@@ -53,6 +60,8 @@ def run_static_analysis(
     collector = EvidenceCollector()
     warnings, unknowns, extra_evidence = unreadable_or_sensitive_warnings(file_tree)
     collector.extend(extra_evidence)
+    surfaces = classify_repo_surfaces(file_tree)
+    surface_map = {item.path: item for item in surfaces}
 
     analysis_mode = AnalysisMode.FULL_PYTHON
     if file_tree.primary_language.lower() != "python":
@@ -79,7 +88,7 @@ def run_static_analysis(
     if analysis_mode == AnalysisMode.DEGRADED_NON_PYTHON:
         modules = [
             module.model_copy(update={"likely_layer": LayerType.UNKNOWN})
-            for module in identify_modules(file_tree)
+            for module in identify_modules(file_tree, surface_map=surface_map)
         ]
         layer_view = LayerViewResult(
             layer_view_id=stable_id("layer-view", repository.repo_id, "non-python"),
@@ -119,14 +128,22 @@ def run_static_analysis(
             evidence_catalog=collector.list(),
             unknown_items=dedupe_by_id(unknowns, "unknown_id"),
             warnings=warnings,
+            knowledge_base=_build_knowledge_base(
+                repository.repo_id, surfaces, [], modules, datetime.now(UTC)
+            ),
         )
         analysis.reading_path = build_reading_path(analysis)
         _backfill_referenced_evidence(analysis)
         return analysis
 
-    entries = detect_entry_candidates(file_tree)
+    all_entries = detect_entry_candidates(
+        file_tree,
+        surface_map=surface_map,
+        include_workspace_candidates=True,
+    )
+    entries = detect_entry_candidates(file_tree, surface_map=surface_map)
     imports = classify_imports(file_tree)
-    modules = identify_modules(file_tree)
+    modules = identify_modules(file_tree, surface_map=surface_map)
     layer_view = infer_layers(entries, modules)
 
     layer_lookup: dict[str, str] = {}
@@ -176,9 +193,7 @@ def run_static_analysis(
                 topic=UnknownTopic.DEPENDENCY,
                 description=f"{len(unknown_imports)} imports could not be classified confidently.",
                 related_paths=[
-                    path
-                    for item in unknown_imports[:3]
-                    for path in item.used_by_files[:1]
+                    path for item in unknown_imports[:3] for path in item.used_by_files[:1]
                 ],
                 reason="Imports did not match internal modules, stdlib, or declared dependencies.",
             )
@@ -211,9 +226,17 @@ def run_static_analysis(
         evidence_catalog=collector.list(),
         unknown_items=dedupe_by_id(unknowns, "unknown_id"),
         warnings=warnings,
+        knowledge_base=None,
     )
     analysis.reading_path = build_reading_path(analysis)
     _backfill_referenced_evidence(analysis)
+    analysis.knowledge_base = _build_knowledge_base(
+        repository.repo_id,
+        surfaces,
+        all_entries,
+        analysis.module_summaries,
+        analysis.generated_at,
+    )
     return analysis
 
 
@@ -265,3 +288,76 @@ def _backfill_referenced_evidence(analysis: AnalysisBundle) -> None:
 
     if generated:
         analysis.evidence_catalog = [*analysis.evidence_catalog, *generated]
+
+
+def _build_knowledge_base(
+    repo_id: str,
+    surfaces: list[RepoSurfaceAssignment],
+    entries: list,
+    modules: list,
+    generated_at: datetime,
+) -> RepositoryKnowledgeBase:
+    observations: list[KnowledgeObservation] = []
+    for assignment in surfaces[:80]:
+        observations.append(
+            KnowledgeObservation(
+                observation_id=stable_id("obs", "surface", assignment.path),
+                kind="surface_assignment",
+                path=assignment.path,
+                summary=assignment.reason,
+                surface=assignment.surface,
+                evidence_refs=[],
+            )
+        )
+
+    candidates: list[KnowledgeCandidate] = []
+    for entry in entries:
+        candidates.append(
+            KnowledgeCandidate(
+                candidate_id=stable_id("cand", "entry", entry.entry_id),
+                candidate_type="entry",
+                target_id=entry.entry_id,
+                title=entry.target_value,
+                summary=entry.reason,
+                score=entry.score or 0.0,
+                confidence=entry.confidence,
+                surface=entry.surface,
+                visibility_modes=["teaching", "workspace"]
+                if entry.entry_role != EntryRole.WORKSPACE_OR_TOOL_ENTRY
+                else ["workspace"],
+                evidence_refs=entry.evidence_refs,
+                metadata={"entry_role": entry.entry_role, "target_type": entry.target_type},
+            )
+        )
+    for module in modules:
+        candidates.append(
+            KnowledgeCandidate(
+                candidate_id=stable_id("cand", "module", module.module_id),
+                candidate_type="module",
+                target_id=module.module_id,
+                title=module.path,
+                summary=module.responsibility or module.path,
+                score=float(max(0, 100 - (module.importance_rank or 99) * 10)),
+                confidence=module.confidence,
+                surface=module.surface,
+                visibility_modes=["teaching", "workspace"]
+                if module.surface in {RepoSurface.PRODUCT, RepoSurface.ROOT_MISC, None}
+                else ["workspace"],
+                evidence_refs=module.evidence_refs,
+                metadata={"main_path_role": module.main_path_role},
+            )
+        )
+
+    return RepositoryKnowledgeBase(
+        kb_id=stable_id("kb", repo_id, generated_at.isoformat()),
+        repo_id=repo_id,
+        generated_at=generated_at,
+        observations=observations,
+        candidates=candidates,
+        surfaces=surfaces,
+        teaching_notes=[
+            "Teaching mode 默认只把 product_surface 当成主线候选来源。",
+            "workspace_meta、tooling、docs、test、build surface 默认不参与主入口排序。",
+            "入口候选是教学阅读起点候选，不保证等于唯一真实运行入口。",
+        ],
+    )

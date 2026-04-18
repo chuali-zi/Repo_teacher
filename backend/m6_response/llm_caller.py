@@ -13,7 +13,7 @@ CONFIG_PATH = Path(__file__).resolve().parents[2] / "llm_config.json"
 DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-chat"
 DEFAULT_TIMEOUT_SECONDS = 60.0
-MAX_RETRIES = 1
+MAX_RETRIES = 0
 
 
 @dataclass(frozen=True)

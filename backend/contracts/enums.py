@@ -108,6 +108,23 @@ class EntryTargetType(StrEnum):
     UNKNOWN = "unknown"
 
 
+class RepoSurface(StrEnum):
+    PRODUCT = "product_surface"
+    WORKSPACE_META = "workspace_meta"
+    DOCS = "docs_surface"
+    TOOLING = "tooling_surface"
+    TEST = "test_surface"
+    BUILD = "build_surface"
+    ROOT_MISC = "root_misc_surface"
+
+
+class EntryRole(StrEnum):
+    PRIMARY_PRODUCT_ENTRY = "primary_product_entry"
+    SECONDARY_RUNTIME_ENTRY = "secondary_runtime_entry"
+    WORKSPACE_OR_TOOL_ENTRY = "workspace_or_tool_entry"
+    UNCERTAIN = "uncertain"
+
+
 class ImportSourceType(StrEnum):
     INTERNAL = "internal"
     STDLIB = "stdlib"
@@ -294,11 +311,23 @@ class RuntimeEventType(StrEnum):
     STATUS_CHANGED = "status_changed"
     ANALYSIS_PROGRESS = "analysis_progress"
     DEGRADATION_NOTICE = "degradation_notice"
+    AGENT_ACTIVITY = "agent_activity"
     ANSWER_STREAM_START = "answer_stream_start"
     ANSWER_STREAM_DELTA = "answer_stream_delta"
     ANSWER_STREAM_END = "answer_stream_end"
     MESSAGE_COMPLETED = "message_completed"
     ERROR = "error"
+
+
+class AgentActivityPhase(StrEnum):
+    THINKING = "thinking"
+    PLANNING_TOOL_CALL = "planning_tool_call"
+    TOOL_RUNNING = "tool_running"
+    TOOL_SUCCEEDED = "tool_succeeded"
+    TOOL_FAILED = "tool_failed"
+    DEGRADED_CONTINUE = "degraded_continue"
+    WAITING_LLM_AFTER_TOOL = "waiting_llm_after_tool"
+    SLOW_WARNING = "slow_warning"
 
 
 class ProgressStepKey(StrEnum):

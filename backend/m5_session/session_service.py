@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import shutil
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
@@ -7,6 +8,7 @@ from pathlib import PureWindowsPath
 from uuid import uuid4
 
 from backend.contracts.domain import (
+    AgentActivity,
     ConversationState,
     DegradationFlag,
     ExplainedItemRef,
@@ -27,6 +29,7 @@ from backend.contracts.domain import (
     UserFacingErrorException,
 )
 from backend.contracts.dto import (
+    AgentActivityDto,
     ClearSessionData,
     DegradationFlagDto,
     MessageErrorStateDto,
@@ -41,6 +44,7 @@ from backend.contracts.dto import (
     ValidateRepoData,
 )
 from backend.contracts.enums import (
+    AgentActivityPhase,
     CleanupStatus,
     ClientView,
     ConversationSubStatus,
@@ -219,6 +223,13 @@ class SessionService:
                 for item in session.active_degradations
             ],
             messages=[self._message_dto(item) for item in session.conversation.messages],
+            active_agent_activity=(
+                AgentActivityDto.model_validate(
+                    session.active_agent_activity.model_dump(mode="python")
+                )
+                if session.active_agent_activity
+                else None
+            ),
             active_error=UserFacingErrorDto.from_domain(session.last_error)
             if session.last_error
             else None,
@@ -254,7 +265,17 @@ class SessionService:
         )
         session.last_error = None
         session.conversation.sub_status = ConversationSubStatus.AGENT_THINKING
+        session.active_agent_activity = AgentActivity(
+            activity_id=new_id("act"),
+            phase=AgentActivityPhase.THINKING,
+            summary="正在理解你的问题",
+        )
         session.updated_at = utc_now()
+        self._append_runtime_event(
+            session,
+            RuntimeEventType.AGENT_ACTIVITY,
+            activity=session.active_agent_activity,
+        )
         return SendMessageData(
             accepted=True,
             status="chatting",
@@ -486,7 +507,10 @@ class SessionService:
                 prompt_input,
                 repository=session.repository,
                 file_tree=session.file_tree,
+                analysis=session.analysis,
+                teaching_skeleton=session.teaching_skeleton,
                 tool_streamer=self.tool_streamer,
+                on_activity=lambda **payload: self._record_agent_activity(session, **payload),
             )
         else:
             answer_stream = stream_answer_text(prompt_input, llm_streamer=self.llm_streamer)
@@ -499,36 +523,37 @@ class SessionService:
         json_marker = "<json_output>"
         marker_tail_size = len(json_marker) - 1
         try:
-            async for chunk in answer_stream:
-                raw_chunks.append(chunk)
-                if json_output_started:
-                    continue
-                visible_buffer += chunk
-                marker_index = visible_buffer.find(json_marker)
-                if marker_index >= 0:
-                    visible_chunk = visible_buffer[:marker_index]
-                    visible_buffer = ""
-                    json_output_started = True
-                elif len(visible_buffer) > marker_tail_size:
-                    visible_chunk = visible_buffer[:-marker_tail_size]
-                    visible_buffer = visible_buffer[-marker_tail_size:]
-                else:
-                    visible_chunk = ""
-                if visible_chunk:
-                    visible_chunks.append(visible_chunk)
-                    yield self._append_runtime_event(
-                        session,
-                        RuntimeEventType.ANSWER_STREAM_DELTA,
-                        message_id=answer_id,
-                        message_chunk=visible_chunk,
-                    )
-                if json_output_started and not answer_stream_ended:
-                    yield self._append_runtime_event(
-                        session,
-                        RuntimeEventType.ANSWER_STREAM_END,
-                        message_id=answer_id,
-                    )
-                    answer_stream_ended = True
+            async with asyncio.timeout(45):
+                async for chunk in answer_stream:
+                    raw_chunks.append(chunk)
+                    if json_output_started:
+                        continue
+                    visible_buffer += chunk
+                    marker_index = visible_buffer.find(json_marker)
+                    if marker_index >= 0:
+                        visible_chunk = visible_buffer[:marker_index]
+                        visible_buffer = ""
+                        json_output_started = True
+                    elif len(visible_buffer) > marker_tail_size:
+                        visible_chunk = visible_buffer[:-marker_tail_size]
+                        visible_buffer = visible_buffer[-marker_tail_size:]
+                    else:
+                        visible_chunk = ""
+                    if visible_chunk:
+                        visible_chunks.append(visible_chunk)
+                        yield self._append_runtime_event(
+                            session,
+                            RuntimeEventType.ANSWER_STREAM_DELTA,
+                            message_id=answer_id,
+                            message_chunk=visible_chunk,
+                        )
+                    if json_output_started and not answer_stream_ended:
+                        yield self._append_runtime_event(
+                            session,
+                            RuntimeEventType.ANSWER_STREAM_END,
+                            message_id=answer_id,
+                        )
+                        answer_stream_ended = True
         except Exception as exc:
             for event in self._fail_chat_turn(session, exc):
                 yield event
@@ -586,6 +611,7 @@ class SessionService:
             session.conversation.current_learning_goal,
             answer.message_type,
         )
+        session.active_agent_activity = None
         session.last_error = None
         self._record_explained_items(session, answer, message.message_id)
         self._update_teaching_state_after_answer(
@@ -684,9 +710,9 @@ class SessionService:
             raise RuntimeError("M6 returned a non-initial-report answer for initial analysis")
 
         visible_text = "".join(visible_chunks)
-        answer = parsed_answer.model_copy(
-            update={"answer_id": answer_id, "raw_text": visible_text}
-        )
+        if not visible_text.strip():
+            raise RuntimeError("LLM returned an initial report without user-visible text")
+        answer = parsed_answer.model_copy(update={"answer_id": answer_id, "raw_text": visible_text})
         self._ensure_initial_report_suggestions(session, answer)
         yield answer
 
@@ -745,7 +771,8 @@ class SessionService:
             history_summary=self._history_summary(session),
             depth_level=depth,
             output_contract=self._output_contract(depth),
-            enable_tool_calls=scenario in (
+            enable_tool_calls=scenario
+            in (
                 PromptScenario.FOLLOW_UP,
                 PromptScenario.GOAL_SWITCH,
                 PromptScenario.DEPTH_ADJUSTMENT,
@@ -1200,6 +1227,7 @@ class SessionService:
         start_index = len(session.runtime_events)
         error = self.llm_failed_error(exc)
         session.last_error = error
+        session.active_agent_activity = None
         self._transition_status(
             session,
             SessionStatus.CHATTING,
@@ -1431,6 +1459,7 @@ class SessionService:
         user_notice: str | None = None,
         error: UserFacingError | None = None,
         degradation: DegradationFlag | None = None,
+        activity: AgentActivity | None = None,
         payload: dict | None = None,
     ) -> RuntimeEvent:
         event = RuntimeEvent(
@@ -1448,11 +1477,45 @@ class SessionService:
             user_notice=user_notice,
             error=error,
             degradation=degradation,
+            activity=activity,
             payload=payload,
         )
         session.runtime_events.append(event)
         session.updated_at = event.occurred_at
         return event
+
+    def _record_agent_activity(
+        self,
+        session: SessionContext,
+        *,
+        phase: str,
+        summary: str,
+        tool_name: str | None = None,
+        tool_arguments: dict | None = None,
+        round_index: int | None = None,
+        elapsed_ms: int | None = None,
+        soft_timed_out: bool = False,
+        failed: bool = False,
+        retryable: bool = False,
+    ) -> RuntimeEvent:
+        activity = AgentActivity(
+            activity_id=new_id("act"),
+            phase=AgentActivityPhase(phase),
+            summary=summary,
+            tool_name=tool_name,
+            tool_arguments=tool_arguments or {},
+            round_index=round_index,
+            elapsed_ms=elapsed_ms,
+            soft_timed_out=soft_timed_out,
+            failed=failed,
+            retryable=retryable,
+        )
+        session.active_agent_activity = activity
+        return self._append_runtime_event(
+            session,
+            RuntimeEventType.AGENT_ACTIVITY,
+            activity=activity,
+        )
 
     def _emit_answer_events(
         self,
