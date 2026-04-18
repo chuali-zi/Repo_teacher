@@ -87,6 +87,8 @@ from backend.m5_session.teaching_state import (
 )
 from backend.m6_response.answer_generator import (
     LlmStreamer,
+    ToolStreamActivity,
+    ToolStreamTextDelta,
     ToolAwareLlmStreamer,
     parse_answer,
     stream_answer_text,
@@ -524,7 +526,16 @@ class SessionService:
         marker_tail_size = len(json_marker) - 1
         try:
             async with asyncio.timeout(45):
-                async for chunk in answer_stream:
+                async for item in answer_stream:
+                    if isinstance(item, ToolStreamActivity):
+                        event = (
+                            item.recorded_event
+                            if isinstance(item.recorded_event, RuntimeEvent)
+                            else self._record_agent_activity(session, **item.payload)
+                        )
+                        yield event
+                        continue
+                    chunk = item.text if isinstance(item, ToolStreamTextDelta) else item
                     raw_chunks.append(chunk)
                     if json_output_started:
                         continue
@@ -554,6 +565,9 @@ class SessionService:
                             message_id=answer_id,
                         )
                         answer_stream_ended = True
+        except asyncio.CancelledError as exc:
+            self._cancel_chat_turn(session, exc)
+            raise
         except Exception as exc:
             for event in self._fail_chat_turn(session, exc):
                 yield event
@@ -1226,6 +1240,34 @@ class SessionService:
     def _fail_chat_turn(self, session: SessionContext, exc: Exception) -> list[RuntimeEvent]:
         start_index = len(session.runtime_events)
         error = self.llm_failed_error(exc)
+        session.last_error = error
+        session.active_agent_activity = None
+        self._transition_status(
+            session,
+            SessionStatus.CHATTING,
+            ConversationSubStatus.WAITING_USER,
+        )
+        self._append_runtime_event(
+            session,
+            RuntimeEventType.ERROR,
+            error=error,
+        )
+        return session.runtime_events[start_index:]
+
+    def _cancel_chat_turn(
+        self,
+        session: SessionContext,
+        exc: asyncio.CancelledError,
+    ) -> list[RuntimeEvent]:
+        start_index = len(session.runtime_events)
+        error = UserFacingError(
+            error_code=ErrorCode.LLM_API_FAILED,
+            message="本轮输出连接已中断，请重试。",
+            retryable=True,
+            stage=SessionStatus.CHATTING,
+            input_preserved=True,
+            internal_detail=str(exc) or "chat stream cancelled",
+        )
         session.last_error = error
         session.active_agent_activity = None
         self._transition_status(

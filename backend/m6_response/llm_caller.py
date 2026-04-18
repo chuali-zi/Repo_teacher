@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import urllib.error
 import urllib.request
 from collections.abc import AsyncIterator
@@ -14,6 +15,10 @@ DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-chat"
 DEFAULT_TIMEOUT_SECONDS = 60.0
 MAX_RETRIES = 0
+ENV_API_KEY = "REPO_TUTOR_LLM_API_KEY"
+ENV_BASE_URL = "REPO_TUTOR_LLM_BASE_URL"
+ENV_MODEL = "REPO_TUTOR_LLM_MODEL"
+ENV_TIMEOUT_SECONDS = "REPO_TUTOR_LLM_TIMEOUT_SECONDS"
 
 
 @dataclass(frozen=True)
@@ -117,14 +122,16 @@ async def stream_llm_response_with_tools(
 
     for _attempt in range(MAX_RETRIES + 1):
         try:
-            stream = await client.chat.completions.create(
-                model=config.model,
-                messages=messages,
-                tools=tools,
-                temperature=temperature,
-                stream=True,
-                timeout=config.timeout_seconds,
-            )
+            request_kwargs: dict[str, Any] = {
+                "model": config.model,
+                "messages": messages,
+                "temperature": temperature,
+                "stream": True,
+                "timeout": config.timeout_seconds,
+            }
+            if tools:
+                request_kwargs["tools"] = tools
+            stream = await client.chat.completions.create(**request_kwargs)
             result = StreamResult()
             pending_tool_calls: dict[int, ToolCallRequest] = {}
 
@@ -222,22 +229,35 @@ def _complete_with_stdlib_http(
 
 
 def load_llm_config(config_path: Path = CONFIG_PATH) -> LlmConfig:
+    payload: dict[str, Any] = {}
     try:
         payload = json.loads(config_path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
-        raise RuntimeError(f"缺少 LLM 配置文件，请创建 {config_path.name}") from exc
+        if not os.getenv(ENV_API_KEY):
+            raise RuntimeError(
+                f"缺少 LLM 配置文件，请创建 {config_path.name} 或设置 {ENV_API_KEY}"
+            ) from exc
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"LLM 配置文件格式错误: {config_path.name}") from exc
 
-    api_key = str(payload.get("api_key") or "").strip()
+    api_key = str(os.getenv(ENV_API_KEY) or payload.get("api_key") or "").strip()
     if not api_key:
         raise RuntimeError(f"LLM 配置文件缺少 api_key: {config_path.name}")
 
-    base_url = str(payload.get("base_url") or DEFAULT_BASE_URL).strip() or DEFAULT_BASE_URL
-    model = str(payload.get("model") or DEFAULT_MODEL).strip() or DEFAULT_MODEL
+    base_url = (
+        str(os.getenv(ENV_BASE_URL) or payload.get("base_url") or DEFAULT_BASE_URL).strip()
+        or DEFAULT_BASE_URL
+    )
+    model = (
+        str(os.getenv(ENV_MODEL) or payload.get("model") or DEFAULT_MODEL).strip()
+        or DEFAULT_MODEL
+    )
 
     try:
-        timeout_seconds = float(payload.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS))
+        timeout_seconds = float(
+            os.getenv(ENV_TIMEOUT_SECONDS)
+            or payload.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS)
+        )
     except (TypeError, ValueError) as exc:
         raise RuntimeError(f"LLM 配置文件中的 timeout_seconds 非法: {config_path.name}") from exc
 

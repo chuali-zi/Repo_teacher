@@ -23,7 +23,7 @@ from backend.contracts.enums import (
     TeachingPlanStepStatus,
 )
 from backend.m5_session.session_service import SessionService
-from backend.m6_response.llm_caller import StreamResult
+from backend.m6_response.llm_caller import StreamResult, ToolCallRequest
 from backend.m5_session import session_service
 from backend.m5_session.event_mapper import runtime_event_to_sse
 from backend.m5_session.event_streams import iter_analysis_events, iter_chat_events
@@ -360,7 +360,7 @@ def test_chat_stream_completes_followup_answer(tmp_path: Path, fake_llm_streamer
     tool_names = {result["tool_name"] for result in prompt_payload["tool_context"]["tool_results"]}
     assert "m4.get_topic_slice" in tool_names
     assert "m3.get_entry_candidates" in tool_names
-    assert "repo.read_file_excerpt" in tool_names
+    assert "read_file_excerpt" in tool_names
     assert prompt_payload["teaching_plan"]["steps"]
     assert prompt_payload["student_learning_state"]["topics"]
     assert prompt_payload["teacher_working_log"]["current_teaching_objective"]
@@ -385,6 +385,93 @@ def test_chat_stream_completes_followup_answer(tmp_path: Path, fake_llm_streamer
     assert TeachingDebugEventType.STUDENT_STATE_UPDATED in debug_event_types
     assert TeachingDebugEventType.WORKING_LOG_UPDATED in debug_event_types
     assert TeachingDebugEventType.NEXT_TRANSITION_SELECTED in debug_event_types
+
+    session_service.clear_active_session()
+
+
+def test_chat_stream_emits_tool_activity_in_same_sse_turn(tmp_path: Path) -> None:
+    (tmp_path / "README.md").write_text("# demo\n", encoding="utf-8")
+    (tmp_path / "main.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+
+    session_service.create_repo_session(str(tmp_path))
+    session_id = session_service.store.active_session.session_id
+    asyncio.run(_collect(iter_analysis_events(session_id)))
+
+    call_count = 0
+
+    async def tool_calling_streamer(
+        messages, *, tools=None, on_content_delta=None, temperature=0.6
+    ):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return StreamResult(
+                tool_calls=[
+                    ToolCallRequest(
+                        call_id="call_main",
+                        function_name="read_file_excerpt",
+                        arguments_json=json.dumps({"relative_path": "main.py"}),
+                    )
+                ],
+                finish_reason="tool_calls",
+            )
+        text = _fake_answer_text("tool activity")
+        if on_content_delta is not None:
+            await on_content_delta(text)
+        return StreamResult(content_chunks=[text], finish_reason="stop")
+
+    session_service.tool_streamer = tool_calling_streamer
+    session_service.accept_chat_message(session_id, "main.py 里做了什么？")
+    events = asyncio.run(_collect(iter_chat_events(session_id)))
+
+    phases = [
+        event.activity.phase
+        for event in events
+        if event.event_type == RuntimeEventType.AGENT_ACTIVITY
+    ]
+    assert AgentActivityPhase.PLANNING_TOOL_CALL in phases
+    assert AgentActivityPhase.TOOL_RUNNING in phases
+    assert AgentActivityPhase.TOOL_SUCCEEDED in phases
+    assert events[-1].event_type == RuntimeEventType.MESSAGE_COMPLETED
+
+    session_service.clear_active_session()
+
+
+def test_cancelled_chat_stream_restores_waiting_user(tmp_path: Path) -> None:
+    (tmp_path / "README.md").write_text("# demo\n", encoding="utf-8")
+    (tmp_path / "app.py").write_text("print('hi')\n", encoding="utf-8")
+
+    session_service.create_repo_session(str(tmp_path))
+    session_id = session_service.store.active_session.session_id
+    asyncio.run(_collect(iter_analysis_events(session_id)))
+
+    async def never_finishes_streamer(
+        messages, *, tools=None, on_content_delta=None, temperature=0.6
+    ):
+        await asyncio.sleep(3600)
+        return StreamResult(content_chunks=[], finish_reason="stop")
+
+    async def cancel_stream() -> None:
+        session_service.tool_streamer = never_finishes_streamer
+        session_service.accept_chat_message(session_id, "这轮会中断")
+        iterator = session_service.run_chat_turn(session_id)
+        first = await iterator.__anext__()
+        second = await iterator.__anext__()
+        assert first.event_type == RuntimeEventType.STATUS_CHANGED
+        assert second.event_type == RuntimeEventType.ANSWER_STREAM_START
+
+        pending = asyncio.create_task(iterator.__anext__())
+        await asyncio.sleep(0)
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+
+    asyncio.run(cancel_stream())
+
+    snapshot = session_service.get_snapshot(session_id)
+    assert snapshot.sub_status == ConversationSubStatus.WAITING_USER
+    assert snapshot.active_error is not None
+    assert snapshot.active_error.retryable is True
 
     session_service.clear_active_session()
 

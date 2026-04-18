@@ -47,11 +47,21 @@ export type RuntimeEventType =
   | 'status_changed'
   | 'analysis_progress'
   | 'degradation_notice'
+  | 'agent_activity'
   | 'answer_stream_start'
   | 'answer_stream_delta'
   | 'answer_stream_end'
   | 'message_completed'
   | 'error';
+export type AgentActivityPhase =
+  | 'thinking'
+  | 'planning_tool_call'
+  | 'tool_running'
+  | 'tool_succeeded'
+  | 'tool_failed'
+  | 'degraded_continue'
+  | 'waiting_llm_after_tool'
+  | 'slow_warning';
 export type ProgressStepKey =
   | 'repo_access'
   | 'file_tree_scan'
@@ -235,6 +245,19 @@ export type DegradationFlagDto = {
   related_paths: string[];
 };
 
+export type AgentActivityDto = {
+  activity_id: string;
+  phase: AgentActivityPhase;
+  summary: string;
+  tool_name?: string | null;
+  tool_arguments: Record<string, unknown>;
+  round_index?: number | null;
+  elapsed_ms?: number | null;
+  soft_timed_out: boolean;
+  failed: boolean;
+  retryable: boolean;
+};
+
 export type SessionSnapshotDto = {
   session_id: string | null;
   status: SessionStatus;
@@ -244,6 +267,7 @@ export type SessionSnapshotDto = {
   progress_steps: ProgressStepStateItem[];
   degradation_notices: DegradationFlagDto[];
   messages: MessageDto[];
+  active_agent_activity: AgentActivityDto | null;
   active_error: UserFacingErrorDto | null;
 };
 
@@ -323,6 +347,11 @@ export type DegradationNoticeEvent = SseEventDto & {
   degradation: DegradationFlagDto;
 };
 
+export type AgentActivityEvent = SseEventDto & {
+  event_type: 'agent_activity';
+  activity: AgentActivityDto;
+};
+
 export type AnswerStreamStartEvent = SseEventDto & {
   event_type: 'answer_stream_start';
   message_id: string;
@@ -361,6 +390,7 @@ export type AnalysisSseEvent =
   | StatusChangedEvent
   | AnalysisProgressEvent
   | DegradationNoticeEvent
+  | AgentActivityEvent
   | AnswerStreamStartEvent
   | AnswerStreamDeltaEvent
   | AnswerStreamEndEvent
@@ -369,6 +399,7 @@ export type AnalysisSseEvent =
 
 export type ChatSseEvent =
   | StatusChangedEvent
+  | AgentActivityEvent
   | AnswerStreamStartEvent
   | AnswerStreamDeltaEvent
   | AnswerStreamEndEvent
@@ -384,6 +415,7 @@ export type ClientSessionStore = {
   progressSteps: ProgressStepStateItem[];
   degradationNotices: DegradationFlagDto[];
   messages: MessageDto[];
+  activeAgentActivity: AgentActivityDto | null;
   activeError: UserFacingErrorDto | null;
 };
 

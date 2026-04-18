@@ -26,6 +26,16 @@ from backend.repo_kb.query_service import (
     get_repo_surfaces,
 )
 
+TOOL_NAME_ALIASES: dict[str, str] = {
+    "repo.get_surfaces": "get_repo_surfaces",
+    "repo.get_entry_candidates": "get_entry_candidates",
+    "repo.get_module_map": "get_module_map",
+    "repo.get_reading_path": "get_reading_path",
+    "repo.get_evidence": "get_evidence",
+    "repo.read_file_excerpt": "read_file_excerpt",
+    "repo.search_text": "search_text",
+}
+
 TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
@@ -180,6 +190,7 @@ def execute_tool_call(
     teaching_skeleton: TeachingSkeleton | None = None,
 ) -> str:
     """Execute a single tool call and return a JSON string for the LLM."""
+    tool_name = normalize_tool_name(tool_name)
     if tool_name == "get_repo_surfaces":
         result = _require_analysis(
             tool_name,
@@ -239,6 +250,10 @@ def execute_tool_call(
             ensure_ascii=False,
         )
     return _serialize_tool_result(result)
+
+
+def normalize_tool_name(tool_name: str) -> str:
+    return TOOL_NAME_ALIASES.get(tool_name, tool_name)
 
 
 def _serialize_tool_result(result: LlmToolResult) -> str:

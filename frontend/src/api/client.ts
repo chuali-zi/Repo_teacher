@@ -70,6 +70,7 @@ const analysisEventNames = [
   'status_changed',
   'analysis_progress',
   'degradation_notice',
+  'agent_activity',
   'answer_stream_start',
   'answer_stream_delta',
   'answer_stream_end',
@@ -79,6 +80,7 @@ const analysisEventNames = [
 
 const chatEventNames = [
   'status_changed',
+  'agent_activity',
   'answer_stream_start',
   'answer_stream_delta',
   'answer_stream_end',

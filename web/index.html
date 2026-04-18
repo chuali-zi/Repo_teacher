@@ -30,27 +30,9 @@
           </div>
         </div>
 
-        <section class="panel" id="repo-panel" hidden>
-          <header class="panel__head">当前仓库</header>
-          <div class="panel__body" id="repo-summary"></div>
-        </section>
-
-        <section class="panel" id="progress-panel" hidden>
-          <header class="panel__head">分析进度</header>
-          <ol class="steps" id="progress-steps"></ol>
-        </section>
-
-        <section class="panel" id="degradation-panel" hidden>
-          <header class="panel__head">降级提示</header>
-          <ul class="notices" id="degradation-list"></ul>
-        </section>
-
-        <section class="panel" id="agent-activity-panel" hidden>
-          <header class="panel__head">Agent 状态</header>
-          <div class="panel__body">
-            <div id="agent-activity-current"></div>
-            <ol class="activity-list" id="agent-activity-history"></ol>
-          </div>
+        <section class="panel status-panel" id="status-panel">
+          <header class="panel__head">Status</header>
+          <div class="panel__body status-panel__body" id="status-body"></div>
         </section>
 
         <div class="sidebar__spacer"></div>
@@ -80,18 +62,9 @@
       </aside>
 
       <section class="stage" id="stage">
-        <header class="stage__head" id="stage-head">
-          <div class="stage__title" id="stage-title">
-            <span class="stage__eyebrow">SESSION</span>
-            <h2>静候输入</h2>
-          </div>
-          <div class="stage__actions" id="stage-actions"></div>
-        </header>
-
         <div class="stage__plugin" data-slot="header" data-host="header"></div>
 
         <div class="stage__body" id="stage-body">
-          <!-- view rendered here -->
           <div class="boot">
             <div class="boot__pulse"></div>
             <p>正在唤醒阅读间…</p>

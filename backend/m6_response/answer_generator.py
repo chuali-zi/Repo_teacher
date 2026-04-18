@@ -18,12 +18,13 @@ from backend.contracts.domain import (
 )
 from backend.m6_response.llm_caller import (
     StreamResult,
+    ToolCallRequest,
     stream_llm_response,
     stream_llm_response_with_tools,
 )
 from backend.m6_response.prompt_builder import build_messages
 from backend.m6_response.response_parser import parse_final_answer
-from backend.m6_response.tool_executor import TOOL_SCHEMAS, execute_tool_call
+from backend.m6_response.tool_executor import TOOL_SCHEMAS, execute_tool_call, normalize_tool_name
 
 LlmStreamer = Callable[[list[dict[str, str]]], AsyncIterator[str]]
 
@@ -33,6 +34,20 @@ ToolAwareLlmStreamer = Callable[
 ]
 
 ActivityEmitter = Callable[..., Any]
+
+
+@dataclass(frozen=True)
+class ToolStreamTextDelta:
+    text: str
+
+
+@dataclass(frozen=True)
+class ToolStreamActivity:
+    payload: dict[str, Any]
+    recorded_event: Any | None = None
+
+
+ToolStreamItem = ToolStreamTextDelta | ToolStreamActivity
 
 
 @dataclass(frozen=True)
@@ -67,37 +82,37 @@ async def stream_answer_text_with_tools(
     tool_streamer: ToolAwareLlmStreamer = stream_llm_response_with_tools,
     on_activity: ActivityEmitter | None = None,
     timeouts: ToolLoopTimeouts = DEFAULT_TOOL_LOOP_TIMEOUTS,
-) -> AsyncIterator[str]:
+) -> AsyncIterator[ToolStreamItem]:
     """Streaming path with tool-calling loop.
 
-    Yields visible text chunks to the caller in real-time. When the LLM
-    requests tool calls, executes them locally and feeds results back,
-    continuing for up to *input_data.max_tool_rounds* iterations.
+    Yields typed items so callers can forward both visible text and tool
+    activity to the client in real time.
     """
     messages: list[dict[str, Any]] = build_messages(input_data)
     max_rounds = input_data.max_tool_rounds
 
     for _round in range(max_rounds + 1):
-        queue: asyncio.Queue[str | None] = asyncio.Queue()
+        queue: asyncio.Queue[ToolStreamItem | None] = asyncio.Queue()
         round_started_at = monotonic()
         saw_visible_content = False
+        emitted_text_chunks: list[str] = []
         tools_for_round = TOOL_SCHEMAS
 
         async def _emit_activity(
             phase: str,
             summary: str,
             **extra: Any,
-        ) -> None:
-            if on_activity is None:
-                return
-            payload = {
-                "phase": phase,
-                "summary": summary,
-                "round_index": _round + 1,
-                "elapsed_ms": int((monotonic() - round_started_at) * 1000),
-            }
-            payload.update(extra)
-            await _maybe_await(on_activity(**payload))
+        ) -> ToolStreamActivity:
+            item = await _make_activity_item(
+                on_activity,
+                round_started_at,
+                _round,
+                phase,
+                summary,
+                **extra,
+            )
+            await queue.put(item)
+            return item
 
         thinking_task = asyncio.create_task(
             _emit_after(
@@ -117,7 +132,8 @@ async def stream_answer_text_with_tools(
         )
 
         async def _on_delta(chunk: str) -> None:
-            await queue.put(chunk)
+            emitted_text_chunks.append(chunk)
+            await queue.put(ToolStreamTextDelta(chunk))
 
         async def _runner() -> StreamResult:
             try:
@@ -135,7 +151,8 @@ async def stream_answer_text_with_tools(
                 item = await queue.get()
                 if item is None:
                     break
-                saw_visible_content = True
+                if isinstance(item, ToolStreamTextDelta):
+                    saw_visible_content = True
                 yield item
             result: StreamResult = await runner_task
         except BaseException:
@@ -151,11 +168,24 @@ async def stream_answer_text_with_tools(
             thinking_task.cancel()
             search_task.cancel()
 
-        if not result.tool_calls or result.finish_reason != "tool_calls":
+        if not emitted_text_chunks and result.content_chunks:
+            for chunk in result.content_chunks:
+                saw_visible_content = True
+                yield ToolStreamTextDelta(chunk)
+
+        if not result.tool_calls:
             return
 
+        tool_calls = _normalize_tool_calls(result.tool_calls, _round)
+
         if not saw_visible_content:
-            await _emit_activity("planning_tool_call", "正在决定要查看哪些代码证据")
+            yield await _make_activity_item(
+                on_activity,
+                round_started_at,
+                _round,
+                "planning_tool_call",
+                "正在决定要查看哪些代码证据",
+            )
 
         assistant_msg: dict[str, Any] = {"role": "assistant"}
         full_content = "".join(result.content_chunks)
@@ -170,12 +200,15 @@ async def stream_answer_text_with_tools(
                     "arguments": tc.arguments_json,
                 },
             }
-            for tc in result.tool_calls
+            for tc in tool_calls
         ]
         messages.append(assistant_msg)
 
-        for tc in result.tool_calls:
-            await _emit_activity(
+        for tc in tool_calls:
+            yield await _make_activity_item(
+                on_activity,
+                round_started_at,
+                _round,
                 "tool_running",
                 _tool_summary(tc.function_name, tc.arguments_json),
                 tool_name=tc.function_name,
@@ -186,16 +219,44 @@ async def stream_answer_text_with_tools(
             except json.JSONDecodeError:
                 arguments = {}
 
-            tool_output, degraded = await _execute_tool_call_with_timeout(
-                tc.function_name,
-                arguments,
-                repository=repository,
-                file_tree=file_tree,
-                analysis=analysis,
-                teaching_skeleton=teaching_skeleton,
-                on_activity=_emit_activity,
-                timeouts=timeouts,
+            tool_activity_queue: asyncio.Queue[ToolStreamActivity] = asyncio.Queue()
+
+            async def _tool_activity(
+                phase: str,
+                summary: str,
+                **extra: Any,
+            ) -> None:
+                item = await _make_activity_item(
+                    on_activity,
+                    round_started_at,
+                    _round,
+                    phase,
+                    summary,
+                    **extra,
+                )
+                await tool_activity_queue.put(item)
+
+            tool_task = asyncio.create_task(
+                _execute_tool_call_with_timeout(
+                    tc.function_name,
+                    arguments,
+                    repository=repository,
+                    file_tree=file_tree,
+                    analysis=analysis,
+                    teaching_skeleton=teaching_skeleton,
+                    on_activity=_tool_activity,
+                    timeouts=timeouts,
+                )
             )
+            while not tool_task.done():
+                try:
+                    yield await asyncio.wait_for(tool_activity_queue.get(), timeout=0.05)
+                except TimeoutError:
+                    continue
+            tool_output, degraded = await tool_task
+            while not tool_activity_queue.empty():
+                yield tool_activity_queue.get_nowait()
+
             messages.append(
                 {
                     "role": "tool",
@@ -214,9 +275,18 @@ async def stream_answer_text_with_tools(
                         ),
                     }
                 )
-                await _emit_activity("degraded_continue", "工具不可用，改为基于已有证据继续回答")
+                yield await _make_activity_item(
+                    on_activity,
+                    round_started_at,
+                    _round,
+                    "degraded_continue",
+                    "工具不可用，改为基于已有证据继续回答",
+                )
             else:
-                await _emit_activity(
+                yield await _make_activity_item(
+                    on_activity,
+                    round_started_at,
+                    _round,
                     "tool_succeeded",
                     f"{tc.function_name} 已返回，继续组织回答",
                     tool_name=tc.function_name,
@@ -224,7 +294,13 @@ async def stream_answer_text_with_tools(
                 )
 
         if _round < max_rounds:
-            await _emit_activity("waiting_llm_after_tool", "已拿到工具结果，正在组织回答")
+            yield await _make_activity_item(
+                on_activity,
+                round_started_at,
+                _round,
+                "waiting_llm_after_tool",
+                "已拿到工具结果，正在组织回答",
+            )
         else:
             messages.append(
                 {
@@ -232,8 +308,113 @@ async def stream_answer_text_with_tools(
                     "content": "工具调用轮次已达上限。接下来直接完成回答，不要再调用工具。",
                 }
             )
-            await _emit_activity("degraded_continue", "已达到工具轮次上限，直接完成回答")
+            yield await _make_activity_item(
+                on_activity,
+                round_started_at,
+                _round,
+                "degraded_continue",
+                "已达到工具轮次上限，直接完成回答",
+            )
+            async for item in _stream_final_answer_without_tools(
+                messages,
+                tool_streamer=tool_streamer,
+                on_activity=on_activity,
+                round_index=_round + 1,
+            ):
+                yield item
             return
+
+
+async def _stream_final_answer_without_tools(
+    messages: list[dict[str, Any]],
+    *,
+    tool_streamer: ToolAwareLlmStreamer,
+    on_activity: ActivityEmitter | None,
+    round_index: int,
+) -> AsyncIterator[ToolStreamItem]:
+    queue: asyncio.Queue[ToolStreamItem | None] = asyncio.Queue()
+    round_started_at = monotonic()
+    emitted_text_chunks: list[str] = []
+
+    async def _on_delta(chunk: str) -> None:
+        emitted_text_chunks.append(chunk)
+        await queue.put(ToolStreamTextDelta(chunk))
+
+    async def _runner() -> StreamResult:
+        try:
+            return await tool_streamer(
+                messages,
+                tools=[],
+                on_content_delta=_on_delta,
+            )
+        finally:
+            await queue.put(None)
+
+    runner_task = asyncio.create_task(_runner())
+    try:
+        while True:
+            item = await queue.get()
+            if item is None:
+                break
+            yield item
+        result = await runner_task
+    except BaseException:
+        runner_task.cancel()
+        try:
+            await runner_task
+        except BaseException:
+            pass
+        raise
+
+    if not emitted_text_chunks and result.content_chunks:
+        for chunk in result.content_chunks:
+            yield ToolStreamTextDelta(chunk)
+
+    if result.tool_calls:
+        yield await _make_activity_item(
+            on_activity,
+            round_started_at,
+            round_index,
+            "degraded_continue",
+            "模型在最终轮仍请求工具，已忽略并结束本轮工具循环",
+        )
+
+
+async def _make_activity_item(
+    on_activity: ActivityEmitter | None,
+    round_started_at: float,
+    round_index: int,
+    phase: str,
+    summary: str,
+    **extra: Any,
+) -> ToolStreamActivity:
+    payload = {
+        "phase": phase,
+        "summary": summary,
+        "round_index": round_index + 1,
+        "elapsed_ms": int((monotonic() - round_started_at) * 1000),
+    }
+    payload.update(extra)
+    recorded_event = None
+    if on_activity is not None:
+        recorded_event = await _maybe_await(on_activity(**payload))
+    return ToolStreamActivity(payload=payload, recorded_event=recorded_event)
+
+
+def _normalize_tool_calls(
+    tool_calls: list[ToolCallRequest],
+    round_index: int,
+) -> list[ToolCallRequest]:
+    normalized: list[ToolCallRequest] = []
+    for index, tc in enumerate(tool_calls, start=1):
+        normalized.append(
+            ToolCallRequest(
+                call_id=tc.call_id or f"call_local_{round_index + 1}_{index}",
+                function_name=normalize_tool_name(tc.function_name or "__missing_tool_name"),
+                arguments_json=tc.arguments_json or "{}",
+            )
+        )
+    return normalized
 
 
 def parse_answer(

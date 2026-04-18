@@ -32,6 +32,12 @@ export function ChatView({ store, onSend, onClear }: ChatViewProps) {
         </section>
       ) : null}
       {store.activeError ? <ErrorDebugPanel error={store.activeError} /> : null}
+      {disabled && store.activeAgentActivity ? (
+        <section className="notice-panel" aria-live="polite">
+          <h2>Agent 正在处理</h2>
+          <p>{store.activeAgentActivity.summary}</p>
+        </section>
+      ) : null}
       <MessageList disabled={disabled} messages={store.messages} onPickSuggestion={onSend} />
       <ChatInput disabled={disabled} placeholder={placeholder} onSend={onSend} />
     </main>

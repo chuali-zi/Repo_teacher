@@ -43,28 +43,28 @@ _MAX_EXCERPT_BYTES = 240_000
 def tool_definitions() -> list[LlmToolDefinition]:
     return [
         LlmToolDefinition(
-            tool_name="repo.get_surfaces",
+            tool_name="get_repo_surfaces",
             source_module="repo_kb.query_service",
             description="读取仓库 surface 分区，区分产品区、文档区、工具区和 workspace/meta 区。",
             input_schema={"mode": "teaching|workspace, default teaching"},
             output_contract="Surface assignments visible in the current mode.",
         ),
         LlmToolDefinition(
-            tool_name="repo.get_entry_candidates",
+            tool_name="get_entry_candidates",
             source_module="repo_kb.query_service",
             description="读取按模式过滤后的入口候选，显式区分主产品入口、次级运行点和工具入口。",
             input_schema={"mode": "teaching|workspace, default teaching"},
             output_contract="Mode-aware grouped entry candidates.",
         ),
         LlmToolDefinition(
-            tool_name="repo.get_module_map",
+            tool_name="get_module_map",
             source_module="repo_kb.query_service",
             description="读取按模式过滤后的模块地图，帮助老师决定先讲产品主线还是工作区支线。",
             input_schema={"mode": "teaching|workspace, default teaching"},
             output_contract="Mode-aware module summaries.",
         ),
         LlmToolDefinition(
-            tool_name="repo.get_reading_path",
+            tool_name="get_reading_path",
             source_module="repo_kb.query_service",
             description="读取与当前教学目标对应的阅读路径建议。",
             input_schema={
@@ -74,7 +74,7 @@ def tool_definitions() -> list[LlmToolDefinition]:
             output_contract="Mode-aware reading path list.",
         ),
         LlmToolDefinition(
-            tool_name="repo.get_evidence",
+            tool_name="get_evidence",
             source_module="repo_kb.query_service",
             description="按 evidence id 或目标路径检索相关证据，用于支撑当前教学结论。",
             input_schema={"evidence_ids": "optional list[str]", "target": "optional str"},
@@ -180,7 +180,7 @@ def tool_definitions() -> list[LlmToolDefinition]:
             output_contract="Suggestion list.",
         ),
         LlmToolDefinition(
-            tool_name="repo.read_file_excerpt",
+            tool_name="read_file_excerpt",
             source_module="llm_tools.repository_reader",
             description="安全读取一个非敏感文件的指定行范围摘录。",
             input_schema={
@@ -192,7 +192,7 @@ def tool_definitions() -> list[LlmToolDefinition]:
             safety_notes=["拒绝越界路径。", "拒绝敏感、忽略或不可读文件。", "密钥形态会被脱敏。"],
         ),
         LlmToolDefinition(
-            tool_name="repo.search_text",
+            tool_name="search_text",
             source_module="llm_tools.repository_reader",
             description="在可读非敏感文本文件中搜索关键词，返回匹配行摘录。",
             input_schema={"query": "str", "max_matches": "int, default 20, max 50"},
@@ -264,7 +264,7 @@ def read_file_excerpt(
     node = _find_readable_file_node(file_tree, normalized)
     if node is None:
         return _tool_result(
-            "repo.read_file_excerpt",
+            "read_file_excerpt",
             "llm_tools.repository_reader",
             f"{normalized} 不可作为 LLM 工具读取。",
             {
@@ -275,7 +275,7 @@ def read_file_excerpt(
         )
     if node.size_bytes and node.size_bytes > _MAX_EXCERPT_BYTES:
         return _tool_result(
-            "repo.read_file_excerpt",
+            "read_file_excerpt",
             "llm_tools.repository_reader",
             f"{normalized} 文件较大，未自动读取正文。",
             {
@@ -291,7 +291,7 @@ def read_file_excerpt(
     lines = _safe_read_lines(file_path)
     if lines is None:
         return _tool_result(
-            "repo.read_file_excerpt",
+            "read_file_excerpt",
             "llm_tools.repository_reader",
             f"{normalized} 读取失败。",
             {
@@ -306,7 +306,7 @@ def read_file_excerpt(
     selected = lines[safe_start - 1 : safe_start - 1 + safe_max]
     excerpt = "".join(selected)
     return _tool_result(
-        "repo.read_file_excerpt",
+        "read_file_excerpt",
         "llm_tools.repository_reader",
         f"读取 {normalized} 第 {safe_start} 行起的 {len(selected)} 行摘录。",
         {
@@ -330,7 +330,7 @@ def search_text(
     stripped_query = query.strip()
     if not stripped_query:
         return _tool_result(
-            "repo.search_text",
+            "search_text",
             "llm_tools.repository_reader",
             "搜索词为空，未执行搜索。",
             {"query": query, "matches": []},
@@ -364,7 +364,7 @@ def search_text(
                 break
 
     return _tool_result(
-        "repo.search_text",
+        "search_text",
         "llm_tools.repository_reader",
         f"搜索 {stripped_query!r} 得到 {len(matches)} 条匹配。",
         {"query": stripped_query, "matches": matches},
@@ -678,7 +678,7 @@ def _starter_excerpts_result(
     if not excerpts:
         return None
     return _tool_result(
-        "repo.read_file_excerpt",
+        "read_file_excerpt",
         "llm_tools.repository_reader",
         f"预读取 {len(excerpts)} 个入口/说明文件摘录。",
         {"files": excerpts},

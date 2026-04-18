@@ -8,7 +8,7 @@ import { api, openStream } from "./api.js";
 import { report } from "./errors.js";
 import { bus } from "./plugins.js";
 
-let stageBody, stageHead, stageTitle, stageActions, stageFoot;
+let stageBody, stageFoot, statusBody;
 let lastView = null;
 let lastSubStatus = null;
 let activeStreamCloser = null;
@@ -42,19 +42,14 @@ const SUB_STATUS_LABELS = {
 
 export function initViews() {
   stageBody = $("#stage-body");
-  stageHead = $("#stage-head");
-  stageTitle = $("#stage-title");
-  stageActions = $("#stage-actions");
   stageFoot = $("#stage-foot");
+  statusBody = $("#status-body");
 
   subscribe(render);
 }
 
 function render(state) {
-  // sidebar bits
   renderSidebar(state);
-  renderTitle(state);
-  renderActions(state);
 
   // session changes → reset stream wiring
   if (state.sessionId !== lastSessionId) {
@@ -212,6 +207,187 @@ function handleSseEvent(kind, evt) {
 // ---------- sidebar / header ----------
 
 function renderSidebar(state) {
+  const statusPanel = $("#status-panel");
+  if (!statusPanel) return;
+  if (!statusBody) statusBody = $("#status-body");
+  if (!statusBody) return;
+
+  statusPanel.hidden = false;
+  clear(statusBody);
+
+  statusBody.appendChild(renderStatusSummary(state));
+
+  const actions = renderStatusActions(state);
+  if (actions) statusBody.appendChild(actions);
+
+  const currentSection = renderStatusCurrentSection(state);
+  if (currentSection) statusBody.appendChild(currentSection);
+
+  const noticesSection = renderStatusNoticeSection(state);
+  if (noticesSection) statusBody.appendChild(noticesSection);
+}
+
+function renderStatusSummary(state) {
+  const summary = el("section", { class: "status-panel__summary" });
+  summary.appendChild(el("div", { class: "status-panel__eyebrow" }, statusPanelEyebrow(state)));
+  summary.appendChild(el("h2", { class: "status-panel__headline" }, statusPanelHeading(state)));
+
+  const detail = statusPanelDetail(state);
+  if (detail) summary.appendChild(el("p", { class: "status-panel__detail" }, detail));
+
+  if (state.repository) {
+    summary.appendChild(el("div", { class: "status-panel__repo" }, renderRepoSummary(state.repository)));
+  }
+  return summary;
+}
+
+function renderStatusActions(state) {
+  if (!state.sessionId) return null;
+  return el(
+    "div",
+    { class: "status-panel__actions" },
+    el(
+      "button",
+      {
+        class: "btn-ghost status-panel__button",
+        type: "button",
+        onclick: handleSwitchRepo,
+      },
+      "切换仓库",
+    ),
+  );
+}
+
+function renderStatusCurrentSection(state) {
+  if ((state.status === "accessing" || state.status === "analyzing" || state.view === "analysis") && state.progressSteps.length > 0) {
+    const section = el("section", { class: "status-panel__section" });
+    section.appendChild(el("div", { class: "status-panel__section-head" }, "分析进度"));
+    const list = el("ol", { class: "steps" });
+    for (const step of state.progressSteps) list.appendChild(renderStep(step));
+    section.appendChild(list);
+    return section;
+  }
+
+  if (state.status === "chatting") {
+    const section = el("section", { class: "status-panel__section" });
+    section.appendChild(el("div", { class: "status-panel__section-head" }, "当前状态"));
+    if (state.activeAgentActivity && state.subStatus !== "waiting_user") {
+      section.appendChild(renderAgentActivityCard(state.activeAgentActivity, { current: true }));
+    } else {
+      section.appendChild(
+        el(
+          "p",
+          { class: "status-panel__empty" },
+          subStatusLabel(state.subStatus) || statusLabel(state.status) || "等待中",
+        ),
+      );
+    }
+    return section;
+  }
+
+  if (state.activeError) {
+    const section = el("section", { class: "status-panel__section" });
+    section.appendChild(el("div", { class: "status-panel__section-head" }, "当前错误"));
+    section.appendChild(el("div", { class: "notice notice--error" }, state.activeError.message || "发生未知错误"));
+    return section;
+  }
+
+  if (state.status === "idle") {
+    const section = el("section", { class: "status-panel__section" });
+    section.appendChild(el("div", { class: "status-panel__section-head" }, "准备开始"));
+    section.appendChild(el("p", { class: "status-panel__empty" }, "提交一个本地路径或 GitHub URL 后开始分析。"));
+    return section;
+  }
+
+  return null;
+}
+
+function renderStatusNoticeSection(state) {
+  if (!state.degradationNotices.length) return null;
+  const section = el("section", { class: "status-panel__section" });
+  section.appendChild(el("div", { class: "status-panel__section-head" }, "提示"));
+  const list = el("ul", { class: "notices" });
+  for (const d of state.degradationNotices) {
+    list.appendChild(
+      el(
+        "li",
+        { class: "notice" },
+        el("strong", null, degradationLabel(d.type)),
+        el("span", null, d.user_notice),
+      ),
+    );
+  }
+  section.appendChild(list);
+  return section;
+}
+
+function stepLabel(stepKey) {
+  switch (stepKey) {
+    case "repo_access": return "仓库接入";
+    case "file_tree_scan": return "文件树扫描";
+    case "entry_and_module_analysis": return "入口与模块分析";
+    case "dependency_analysis": return "依赖来源分析";
+    case "skeleton_assembly": return "教学骨架组装";
+    case "initial_report_generation": return "首轮报告生成";
+    default: return stepKey;
+  }
+}
+
+function statusLabel(status) {
+  switch (status) {
+    case "idle": return "等待输入";
+    case "accessing": return "接入仓库";
+    case "analyzing": return "正在分析";
+    case "chatting": return "教学对话";
+    case "access_error": return "接入失败";
+    case "analysis_error": return "分析失败";
+    default: return status || "状态更新中";
+  }
+}
+
+function subStatusLabel(subStatus) {
+  switch (subStatus) {
+    case "waiting_user": return "等待你的下一步";
+    case "agent_thinking": return "Agent 正在思考…";
+    case "agent_streaming": return "Agent 正在写回答…";
+    default: return "";
+  }
+}
+
+function degradationLabel(type) {
+  switch (type) {
+    case "large_repo": return "大仓库";
+    case "non_python_repo": return "非 Python";
+    case "entry_not_found": return "入口未知";
+    case "flow_not_reliable": return "流程不可靠";
+    case "layer_not_reliable": return "分层不可靠";
+    case "analysis_timeout": return "分析超时";
+    default: return type;
+  }
+}
+
+function statusPanelEyebrow(state) {
+  if (state.status === "chatting") return "CONVERSATION";
+  return "SESSION";
+}
+
+function statusPanelHeading(state) {
+  if (state.status === "idle") return "等待仓库输入";
+  if (state.status === "access_error" || state.status === "analysis_error") return "当前流程已中断";
+  if (state.status === "chatting") return state.subStatus === "waiting_user" ? "可以继续提问" : "Agent 正在处理中";
+  return statusLabel(state.status);
+}
+
+function statusPanelDetail(state) {
+  if (state.repository) return `当前仓库：${state.repository.display_name}`;
+  if (state.status === "idle") return "左侧只保留一个状态栏，仓库提交后会在这里持续更新。";
+  if (state.status === "access_error" || state.status === "analysis_error") {
+    return state.activeError?.message || "请切换仓库或重新提交。";
+  }
+  return subStatusLabel(state.subStatus) || statusLabel(state.status) || "";
+}
+
+function renderSidebarLegacy(state) {
   const repoPanel = $("#repo-panel");
   const repoSummary = $("#repo-summary");
   if (state.repository) {
@@ -290,17 +466,13 @@ function renderRepoSummary(repo) {
 function renderStep(step) {
   return el("li", { class: "step", dataset: { state: step.step_state } },
     el("span", { class: "step__icon" }),
-    el("span", { class: "step__label" }, STEP_LABELS[step.step_key] || step.step_key),
+    el("span", { class: "step__label" }, stepLabel(step.step_key)),
     el("span", { class: "step__hint" }, step.step_state),
   );
 }
 
 function renderTitle(state) {
-  clear(stageTitle);
-  const eye = el("span", { class: "stage__eyebrow" }, statusEyebrow(state));
-  const heading = el("h2", null, statusHeading(state));
-  stageTitle.appendChild(eye);
-  stageTitle.appendChild(heading);
+  return state;
 }
 
 function statusEyebrow(state) {
@@ -315,15 +487,7 @@ function statusHeading(state) {
 }
 
 function renderActions(state) {
-  clear(stageActions);
-  if (state.sessionId && (state.status === "chatting" || state.status === "analyzing")) {
-    const btn = el("button", {
-      class: "btn-ghost",
-      type: "button",
-      onclick: handleSwitchRepo,
-    }, "切换仓库");
-    stageActions.appendChild(btn);
-  }
+  return state;
 }
 
 async function handleSwitchRepo() {
@@ -1137,7 +1301,7 @@ function mountChatComposer(state) {
   const btn = $("#chat-send", composer);
   ta.disabled = state.subStatus !== "waiting_user";
   btn.disabled = state.subStatus !== "waiting_user";
-  if (ta.disabled) ta.placeholder = SUB_STATUS_LABELS[state.subStatus] || "Agent 正在思考…";
+  if (ta.disabled) ta.placeholder = subStatusLabel(state.subStatus) || "Agent 正在思考…";
 
   ta.addEventListener("input", () => {
     ta.style.height = "auto";
@@ -1171,5 +1335,5 @@ function updateChatComposer(state) {
   const enabled = state.subStatus === "waiting_user";
   ta.disabled = !enabled;
   btn.disabled = !enabled || ta.value.trim().length === 0;
-  ta.placeholder = enabled ? "输入你的问题，或点击上方建议…" : (SUB_STATUS_LABELS[state.subStatus] || "…");
+  ta.placeholder = enabled ? "输入你的问题，或点击上方建议…" : (subStatusLabel(state.subStatus) || "…");
 }

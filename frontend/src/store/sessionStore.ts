@@ -16,6 +16,7 @@ export const initialClientSessionStore: ClientSessionStore = {
   progressSteps: [],
   degradationNotices: [],
   messages: [],
+  activeAgentActivity: null,
   activeError: null
 };
 
@@ -48,6 +49,7 @@ export function fromSnapshot(snapshot: SessionSnapshotDto): ClientSessionStore {
     progressSteps: snapshot.progress_steps,
     degradationNotices: snapshot.degradation_notices,
     messages: snapshot.messages,
+    activeAgentActivity: snapshot.active_agent_activity,
     activeError: snapshot.active_error
   };
 }
@@ -80,9 +82,15 @@ export function applySseEvent(
           (item) => item.degradation_id
         )
       };
+    case 'agent_activity':
+      return {
+        ...state,
+        activeAgentActivity: event.activity
+      };
     case 'answer_stream_start':
       return {
         ...state,
+        activeError: null,
         messages: upsertMessage(state.messages, {
           message_id: event.message_id,
           role: 'agent',
@@ -121,6 +129,8 @@ export function applySseEvent(
         status: event.status,
         subStatus: event.sub_status,
         currentView: event.view,
+        activeAgentActivity: null,
+        activeError: null,
         messages: upsertMessage(state.messages, event.message)
       };
     case 'error':
@@ -129,6 +139,7 @@ export function applySseEvent(
         status: event.status,
         subStatus: event.sub_status,
         currentView: event.view,
+        activeAgentActivity: null,
         activeError: event.error
       };
   }

@@ -10,7 +10,6 @@ import pytest
 
 from backend.contracts.domain import (
     ConversationState,
-    LlmToolContext,
     OutputContract,
     PromptBuildInput,
     RepositoryContext,
@@ -24,7 +23,12 @@ from backend.m2_file_tree.tree_scanner import scan_repository_tree
 from backend.m3_analysis import run_static_analysis
 from backend.m4_skeleton import assemble_teaching_skeleton
 from backend.m6_response import answer_generator
-from backend.m6_response.answer_generator import ToolLoopTimeouts, stream_answer_text_with_tools
+from backend.m6_response.answer_generator import (
+    ToolLoopTimeouts,
+    ToolStreamActivity,
+    ToolStreamTextDelta,
+    stream_answer_text_with_tools,
+)
 from backend.m6_response.llm_caller import StreamResult, ToolCallRequest
 from backend.m6_response.prompt_builder import build_messages
 from backend.m6_response.tool_executor import TOOL_SCHEMAS, execute_tool_call
@@ -75,6 +79,18 @@ def _prompt_input(skeleton, conversation, *, enable_tools: bool = True) -> Promp
         enable_tool_calls=enable_tools,
         max_tool_rounds=3,
     )
+
+
+async def _collect_tool_stream(stream) -> tuple[str, list[object]]:
+    chunks: list[str] = []
+    items: list[object] = []
+    async for item in stream:
+        items.append(item)
+        if isinstance(item, ToolStreamTextDelta):
+            chunks.append(item.text)
+        elif isinstance(item, str):
+            chunks.append(item)
+    return "".join(chunks), items
 
 
 class TestToolSchemas:
@@ -215,15 +231,15 @@ class TestStreamAnswerWithTools:
             return StreamResult(content_chunks=[text], finish_reason="stop")
 
         async def collect():
-            chunks = []
-            async for chunk in stream_answer_text_with_tools(
-                prompt_input,
-                repository=repo,
-                file_tree=file_tree,
-                tool_streamer=fake_tool_streamer,
-            ):
-                chunks.append(chunk)
-            return "".join(chunks)
+            text, _ = await _collect_tool_stream(
+                stream_answer_text_with_tools(
+                    prompt_input,
+                    repository=repo,
+                    file_tree=file_tree,
+                    tool_streamer=fake_tool_streamer,
+                )
+            )
+            return text
 
         result = asyncio.run(collect())
         assert "直接回答" in result
@@ -262,19 +278,70 @@ class TestStreamAnswerWithTools:
             return StreamResult(content_chunks=[text], finish_reason="stop")
 
         async def collect():
-            chunks = []
-            async for chunk in stream_answer_text_with_tools(
-                prompt_input,
-                repository=repo,
-                file_tree=file_tree,
-                tool_streamer=fake_tool_streamer,
-            ):
-                chunks.append(chunk)
-            return "".join(chunks)
+            text, _ = await _collect_tool_stream(
+                stream_answer_text_with_tools(
+                    prompt_input,
+                    repository=repo,
+                    file_tree=file_tree,
+                    tool_streamer=fake_tool_streamer,
+                )
+            )
+            return text
 
         result = asyncio.run(collect())
         assert call_count == 2
         assert "main.py" in result
+
+    def test_tool_calls_run_even_when_finish_reason_is_nonstandard(self, tmp_path: Path) -> None:
+        (tmp_path / "main.py").write_text("def run():\n    pass\n", encoding="utf-8")
+        repo = _repository(tmp_path)
+        file_tree = scan_repository_tree(repo)
+        analysis = run_static_analysis(repo, file_tree)
+        skeleton = assemble_teaching_skeleton(analysis)
+        conversation = ConversationState(current_repo_id=repo.repo_id)
+        prompt_input = _prompt_input(skeleton, conversation)
+        call_count = 0
+
+        async def nonstandard_finish_reason_streamer(
+            messages, *, tools=None, on_content_delta=None, temperature=0.6
+        ):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return StreamResult(
+                    tool_calls=[
+                        ToolCallRequest(
+                            call_id="",
+                            function_name="repo.read_file_excerpt",
+                            arguments_json=json.dumps({"relative_path": "main.py"}),
+                        )
+                    ],
+                    finish_reason="stop",
+                )
+            text = '## 本轮重点\n非标准 finish_reason 仍完成回答。\n<json_output>{"focus":"ok"}</json_output>'
+            if on_content_delta:
+                await on_content_delta(text)
+            return StreamResult(content_chunks=[text], finish_reason="stop")
+
+        async def collect():
+            text, items = await _collect_tool_stream(
+                stream_answer_text_with_tools(
+                    prompt_input,
+                    repository=repo,
+                    file_tree=file_tree,
+                    tool_streamer=nonstandard_finish_reason_streamer,
+                )
+            )
+            return text, items
+
+        result, items = asyncio.run(collect())
+        assert call_count == 2
+        assert "仍完成回答" in result
+        assert any(
+            isinstance(item, ToolStreamActivity)
+            and item.payload.get("tool_name") == "read_file_excerpt"
+            for item in items
+        )
 
     def test_max_tool_rounds_limit_prevents_infinite_loop(self, tmp_path: Path) -> None:
         (tmp_path / "app.py").write_text("pass\n", encoding="utf-8")
@@ -293,6 +360,11 @@ class TestStreamAnswerWithTools:
         ):
             nonlocal call_count
             call_count += 1
+            if tools == []:
+                text = '## 本轮重点\n直接完成最终回答。\n<json_output>{"focus":"done"}</json_output>'
+                if on_content_delta:
+                    await on_content_delta(text)
+                return StreamResult(content_chunks=[text], finish_reason="stop")
             return StreamResult(
                 content_chunks=["partial..."],
                 tool_calls=[
@@ -306,18 +378,23 @@ class TestStreamAnswerWithTools:
             )
 
         async def collect():
-            chunks = []
-            async for chunk in stream_answer_text_with_tools(
-                prompt_input,
-                repository=repo,
-                file_tree=file_tree,
-                tool_streamer=always_call_tools,
-            ):
-                chunks.append(chunk)
-            return chunks
+            text, items = await _collect_tool_stream(
+                stream_answer_text_with_tools(
+                    prompt_input,
+                    repository=repo,
+                    file_tree=file_tree,
+                    tool_streamer=always_call_tools,
+                )
+            )
+            return text, items
 
-        chunks = asyncio.run(collect())
-        assert call_count <= 3  # max_tool_rounds=2 means at most 3 calls (initial + 2 rounds)
+        text, items = asyncio.run(collect())
+        assert call_count == 4  # initial + 2 tool rounds + final no-tool completion
+        assert "直接完成" in text
+        assert any(
+            isinstance(item, ToolStreamActivity) and item.payload["phase"] == "degraded_continue"
+            for item in items
+        )
 
     def test_tool_call_with_search_then_read(self, tmp_path: Path) -> None:
         (tmp_path / "service.py").write_text(
@@ -368,15 +445,15 @@ class TestStreamAnswerWithTools:
             return StreamResult(content_chunks=[text], finish_reason="stop")
 
         async def collect():
-            chunks = []
-            async for chunk in stream_answer_text_with_tools(
-                prompt_input,
-                repository=repo,
-                file_tree=file_tree,
-                tool_streamer=multi_tool_streamer,
-            ):
-                chunks.append(chunk)
-            return "".join(chunks)
+            text, _ = await _collect_tool_stream(
+                stream_answer_text_with_tools(
+                    prompt_input,
+                    repository=repo,
+                    file_tree=file_tree,
+                    tool_streamer=multi_tool_streamer,
+                )
+            )
+            return text
 
         result = asyncio.run(collect())
         assert call_count == 3
@@ -416,16 +493,17 @@ class TestStreamAnswerWithTools:
             return StreamResult(content_chunks=[text], finish_reason="stop")
 
         async def collect():
-            chunks = []
-            async for chunk in stream_answer_text_with_tools(
-                prompt_input,
-                repository=repo,
-                file_tree=file_tree,
-                tool_streamer=fake_tool_streamer,
-                on_activity=lambda **payload: activities.append(payload),
-            ):
-                chunks.append(chunk)
-            return "".join(chunks)
+            text, items = await _collect_tool_stream(
+                stream_answer_text_with_tools(
+                    prompt_input,
+                    repository=repo,
+                    file_tree=file_tree,
+                    tool_streamer=fake_tool_streamer,
+                    on_activity=lambda **payload: activities.append(payload),
+                )
+            )
+            assert any(isinstance(item, ToolStreamActivity) for item in items)
+            return text
 
         result = asyncio.run(collect())
         phases = [item["phase"] for item in activities]
@@ -479,22 +557,22 @@ class TestStreamAnswerWithTools:
             return StreamResult(content_chunks=[text], finish_reason="stop")
 
         async def collect():
-            chunks = []
-            async for chunk in stream_answer_text_with_tools(
-                prompt_input,
-                repository=repo,
-                file_tree=file_tree,
-                tool_streamer=fake_tool_streamer,
-                on_activity=lambda **payload: activities.append(payload),
-                timeouts=ToolLoopTimeouts(
-                    thinking_notice_seconds=0.001,
-                    code_search_notice_seconds=0.002,
-                    tool_soft_timeout_seconds=0.01,
-                    tool_hard_timeout_seconds=0.02,
-                ),
-            ):
-                chunks.append(chunk)
-            return "".join(chunks)
+            text, _ = await _collect_tool_stream(
+                stream_answer_text_with_tools(
+                    prompt_input,
+                    repository=repo,
+                    file_tree=file_tree,
+                    tool_streamer=fake_tool_streamer,
+                    on_activity=lambda **payload: activities.append(payload),
+                    timeouts=ToolLoopTimeouts(
+                        thinking_notice_seconds=0.001,
+                        code_search_notice_seconds=0.002,
+                        tool_soft_timeout_seconds=0.01,
+                        tool_hard_timeout_seconds=0.02,
+                    ),
+                )
+            )
+            return text
 
         result = asyncio.run(collect())
         phases = [item["phase"] for item in activities]

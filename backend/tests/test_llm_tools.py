@@ -52,7 +52,7 @@ def test_llm_tool_context_wraps_m1_to_m4_outputs(tmp_path: Path) -> None:
     assert "m2.get_file_tree_summary" in result_names
     assert "m3.get_entry_candidates" in result_names
     assert "m4.get_initial_report_skeleton" in result_names
-    assert "repo.read_file_excerpt" in result_names
+    assert "read_file_excerpt" in result_names
     repo_result = next(
         result for result in context.tool_results if result.tool_name == "m1.get_repository_context"
     )

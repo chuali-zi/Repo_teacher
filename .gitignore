@@ -8,6 +8,7 @@ dist/
 coverage/
 .env
 .env.*
+llm_config.json
 *.pyc
 *.tsbuildinfo
 *.log
