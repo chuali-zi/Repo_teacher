@@ -22,9 +22,10 @@ from backend.m6_response.answer_generator import (
     stream_answer_text,
     stream_answer_text_with_tools,
 )
+from backend.m6_response.sidecar_stream import JsonOutputSidecarStripper
 
 ENV_CHAT_TURN_TIMEOUT_SECONDS = "REPO_TUTOR_CHAT_TURN_TIMEOUT_SECONDS"
-DEFAULT_CHAT_TURN_TIMEOUT_SECONDS = 240.0
+DEFAULT_CHAT_TURN_TIMEOUT_SECONDS = 600.0
 
 
 @dataclass(frozen=True)
@@ -77,8 +78,6 @@ class ChatWorkflow:
                 prompt_input,
                 repository=session.repository,
                 file_tree=session.file_tree,
-                analysis=session.analysis,
-                teaching_skeleton=session.teaching_skeleton,
                 tool_streamer=tool_streamer,
                 on_activity=lambda **payload: self.events.record_agent_activity(
                     session,
@@ -90,11 +89,7 @@ class ChatWorkflow:
 
         raw_chunks: list[str] = []
         visible_chunks: list[str] = []
-        visible_buffer = ""
-        json_output_started = False
-        answer_stream_ended = False
-        json_marker = "<json_output>"
-        marker_tail_size = len(json_marker) - 1
+        sidecar_stripper = JsonOutputSidecarStripper()
         timeout_scope = None
         try:
             timeout_scope = asyncio.timeout(self.timeouts.total_seconds)
@@ -110,20 +105,7 @@ class ChatWorkflow:
                         continue
                     chunk = item.text if isinstance(item, ToolStreamTextDelta) else item
                     raw_chunks.append(chunk)
-                    if json_output_started:
-                        continue
-                    visible_buffer += chunk
-                    marker_index = visible_buffer.find(json_marker)
-                    if marker_index >= 0:
-                        visible_chunk = visible_buffer[:marker_index]
-                        visible_buffer = ""
-                        json_output_started = True
-                    elif len(visible_buffer) > marker_tail_size:
-                        visible_chunk = visible_buffer[:-marker_tail_size]
-                        visible_buffer = visible_buffer[-marker_tail_size:]
-                    else:
-                        visible_chunk = ""
-                    if visible_chunk:
+                    for visible_chunk in sidecar_stripper.feed(chunk):
                         visible_chunks.append(visible_chunk)
                         yield self.events.append_runtime_event(
                             session,
@@ -131,13 +113,6 @@ class ChatWorkflow:
                             message_id=answer_id,
                             message_chunk=visible_chunk,
                         )
-                    if json_output_started and not answer_stream_ended:
-                        yield self.events.append_runtime_event(
-                            session,
-                            RuntimeEventType.ANSWER_STREAM_END,
-                            message_id=answer_id,
-                        )
-                        answer_stream_ended = True
         except asyncio.CancelledError as exc:
             self.events.cancel_chat_turn(session, exc)
             raise
@@ -155,13 +130,13 @@ class ChatWorkflow:
                 yield event
             return
 
-        if visible_buffer and not json_output_started:
-            visible_chunks.append(visible_buffer)
+        for visible_chunk in sidecar_stripper.finish():
+            visible_chunks.append(visible_chunk)
             yield self.events.append_runtime_event(
                 session,
                 RuntimeEventType.ANSWER_STREAM_DELTA,
                 message_id=answer_id,
-                message_chunk=visible_buffer,
+                message_chunk=visible_chunk,
             )
 
         raw_text = "".join(raw_chunks).strip()
@@ -171,12 +146,11 @@ class ChatWorkflow:
                 yield event
             return
 
-        if not answer_stream_ended:
-            yield self.events.append_runtime_event(
-                session,
-                RuntimeEventType.ANSWER_STREAM_END,
-                message_id=answer_id,
-            )
+        yield self.events.append_runtime_event(
+            session,
+            RuntimeEventType.ANSWER_STREAM_END,
+            message_id=answer_id,
+        )
 
         try:
             parsed_answer = parse_answer(prompt_input, raw_text)

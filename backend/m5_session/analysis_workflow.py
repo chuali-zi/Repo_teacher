@@ -22,11 +22,18 @@ from backend.contracts.enums import (
 )
 from backend.m1_repo_access import access_repository
 from backend.m2_file_tree.tree_scanner import scan_repository_tree
-from backend.m3_analysis import run_static_analysis
-from backend.m4_skeleton import assemble_teaching_skeleton
 from backend.m5_session.common import new_id, utc_now
 from backend.m5_session.errors import analysis_failed_error
-from backend.m6_response.answer_generator import LlmStreamer, parse_answer, stream_answer_text
+from backend.m6_response.answer_generator import (
+    LlmStreamer,
+    ToolAwareLlmStreamer,
+    ToolStreamActivity,
+    ToolStreamTextDelta,
+    parse_answer,
+    stream_answer_text,
+    stream_answer_text_with_tools,
+)
+from backend.m6_response.sidecar_stream import JsonOutputSidecarStripper
 
 
 class AnalysisWorkflow:
@@ -40,6 +47,7 @@ class AnalysisWorkflow:
         session_id: str,
         *,
         llm_streamer: LlmStreamer,
+        tool_streamer: ToolAwareLlmStreamer,
     ) -> AsyncIterator[RuntimeEvent]:
         session = self.repository.require(session_id)
         if session.status == SessionStatus.CHATTING and self.repository.latest_initial_report_completed_event(
@@ -94,30 +102,7 @@ class AnalysisWorkflow:
                     degradation=degradation,
                 )
 
-            analysis = run_static_analysis(repository, file_tree)
-            session.analysis = analysis
-            yield self.events.set_progress_step(
-                session,
-                ProgressStepKey.ENTRY_AND_MODULE_ANALYSIS,
-                ProgressStepState.DONE,
-                "入口与模块分析完成",
-            )
-            yield self.events.set_progress_step(
-                session,
-                ProgressStepKey.DEPENDENCY_ANALYSIS,
-                ProgressStepState.DONE,
-                "依赖来源分析完成",
-            )
-
-            skeleton = assemble_teaching_skeleton(analysis)
-            session.teaching_skeleton = skeleton
             self.teaching.initialize_teaching_state(session)
-            yield self.events.set_progress_step(
-                session,
-                ProgressStepKey.SKELETON_ASSEMBLY,
-                ProgressStepState.DONE,
-                "教学骨架组装完成",
-            )
 
             yield self.events.set_progress_step(
                 session,
@@ -126,7 +111,11 @@ class AnalysisWorkflow:
                 "正在生成首轮教学报告...",
             )
             initial_answer: InitialReportAnswer | None = None
-            async for item in self._stream_initial_report_answer(session, llm_streamer=llm_streamer):
+            async for item in self._stream_initial_report_answer(
+                session,
+                llm_streamer=llm_streamer,
+                tool_streamer=tool_streamer,
+            ):
                 if isinstance(item, RuntimeEvent):
                     yield item
                 else:
@@ -189,16 +178,13 @@ class AnalysisWorkflow:
         session: SessionContext,
         *,
         llm_streamer: LlmStreamer,
+        tool_streamer: ToolAwareLlmStreamer,
     ) -> AsyncIterator[RuntimeEvent | InitialReportAnswer]:
         prompt_input = self.teaching.build_initial_report_prompt_input(session)
         answer_id = new_id("msg_agent_init")
         raw_chunks: list[str] = []
         visible_chunks: list[str] = []
-        visible_buffer = ""
-        json_output_started = False
-        answer_stream_ended = False
-        json_marker = "<json_output>"
-        marker_tail_size = len(json_marker) - 1
+        sidecar_stripper = JsonOutputSidecarStripper()
 
         yield self.events.append_runtime_event(
             session,
@@ -207,22 +193,32 @@ class AnalysisWorkflow:
             payload={"message_type": MessageType.INITIAL_REPORT},
         )
 
-        async for chunk in stream_answer_text(prompt_input, llm_streamer=llm_streamer):
-            raw_chunks.append(chunk)
-            if json_output_started:
+        if prompt_input.enable_tool_calls and session.repository and session.file_tree:
+            answer_stream = stream_answer_text_with_tools(
+                prompt_input,
+                repository=session.repository,
+                file_tree=session.file_tree,
+                tool_streamer=tool_streamer,
+                on_activity=lambda **payload: self.events.record_agent_activity(
+                    session,
+                    **payload,
+                ),
+            )
+        else:
+            answer_stream = stream_answer_text(prompt_input, llm_streamer=llm_streamer)
+
+        async for item in answer_stream:
+            if isinstance(item, ToolStreamActivity):
+                event = (
+                    item.recorded_event
+                    if isinstance(item.recorded_event, RuntimeEvent)
+                    else self.events.record_agent_activity(session, **item.payload)
+                )
+                yield event
                 continue
-            visible_buffer += chunk
-            marker_index = visible_buffer.find(json_marker)
-            if marker_index >= 0:
-                visible_chunk = visible_buffer[:marker_index]
-                visible_buffer = ""
-                json_output_started = True
-            elif len(visible_buffer) > marker_tail_size:
-                visible_chunk = visible_buffer[:-marker_tail_size]
-                visible_buffer = visible_buffer[-marker_tail_size:]
-            else:
-                visible_chunk = ""
-            if visible_chunk:
+            chunk = item.text if isinstance(item, ToolStreamTextDelta) else item
+            raw_chunks.append(chunk)
+            for visible_chunk in sidecar_stripper.feed(chunk):
                 visible_chunks.append(visible_chunk)
                 yield self.events.append_runtime_event(
                     session,
@@ -230,33 +226,25 @@ class AnalysisWorkflow:
                     message_id=answer_id,
                     message_chunk=visible_chunk,
                 )
-            if json_output_started and not answer_stream_ended:
-                yield self.events.append_runtime_event(
-                    session,
-                    RuntimeEventType.ANSWER_STREAM_END,
-                    message_id=answer_id,
-                )
-                answer_stream_ended = True
 
-        if visible_buffer and not json_output_started:
-            visible_chunks.append(visible_buffer)
+        for visible_chunk in sidecar_stripper.finish():
+            visible_chunks.append(visible_chunk)
             yield self.events.append_runtime_event(
                 session,
                 RuntimeEventType.ANSWER_STREAM_DELTA,
                 message_id=answer_id,
-                message_chunk=visible_buffer,
+                message_chunk=visible_chunk,
             )
 
         raw_text = "".join(raw_chunks).strip()
         if not raw_text:
             raise RuntimeError("LLM returned an empty initial report")
 
-        if not answer_stream_ended:
-            yield self.events.append_runtime_event(
-                session,
-                RuntimeEventType.ANSWER_STREAM_END,
-                message_id=answer_id,
-            )
+        yield self.events.append_runtime_event(
+            session,
+            RuntimeEventType.ANSWER_STREAM_END,
+            message_id=answer_id,
+        )
 
         parsed_answer = parse_answer(prompt_input, raw_text)
         if not isinstance(parsed_answer, InitialReportAnswer):

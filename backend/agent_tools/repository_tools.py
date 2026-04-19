@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 import shutil
 import subprocess
@@ -12,7 +13,6 @@ from typing import Any
 from backend.agent_tools.base import ToolSpec
 from backend.contracts.domain import FileNode, FileTreeSnapshot, LlmToolResult, RepositoryContext
 from backend.contracts.enums import FileNodeStatus, FileNodeType
-from backend.m3_analysis._helpers import stable_id
 from backend.security.safety import resolve_repo_relative_path
 
 _SECRET_RE = re.compile(
@@ -311,7 +311,7 @@ def _tool_result(
     payload: dict[str, Any],
 ) -> LlmToolResult:
     return LlmToolResult(
-        result_id=stable_id("tool_result", tool_name, summary),
+        result_id=_stable_id(tool_name, summary),
         tool_name=tool_name,
         source_module=source_module,
         summary=summary,
@@ -371,3 +371,8 @@ def _is_repo_doc(relative_path: str) -> bool:
 
 def _redact(value: str) -> str:
     return _SECRET_RE.sub("[redacted_secret]", value)
+
+
+def _stable_id(*parts: str) -> str:
+    digest = hashlib.md5("::".join(parts).encode("utf-8"), usedforsecurity=False).hexdigest()
+    return f"tool_result_{digest[:16]}"

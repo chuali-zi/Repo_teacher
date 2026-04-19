@@ -73,35 +73,21 @@ def _candidate_tool_names(
     learning_goal: LearningGoal,
     user_text: str,
 ) -> list[str]:
+    names: list[str] = ["m2.list_relevant_files", "search_text"]
     if scenario == PromptScenario.INITIAL_REPORT:
-        return []
+        names.append("read_file_excerpt")
+        return names
 
-    names: list[str] = []
-    if learning_goal == LearningGoal.ENTRY or _contains_any(
-        user_text, ("入口", "启动", "main", "app")
-    ):
-        names.extend(["get_entry_candidates", "get_evidence"])
-    elif learning_goal == LearningGoal.MODULE or _contains_any(
-        user_text, ("模块", "目录", "文件结构")
-    ):
-        names.extend(["get_module_map", "get_evidence"])
-    elif learning_goal == LearningGoal.FLOW or _contains_any(
-        user_text, ("流程", "数据流", "主流程")
-    ):
-        names.extend(["get_reading_path", "m3.get_flow_summaries", "get_evidence"])
-    elif learning_goal == LearningGoal.DEPENDENCY or _contains_any(
-        user_text, ("依赖", "import", "包")
-    ):
-        names.extend(["m3.get_dependency_map", "get_evidence"])
-    elif learning_goal == LearningGoal.LAYER or _contains_any(user_text, ("分层", "层")):
-        names.extend(["m3.get_layer_view", "get_module_map", "get_evidence"])
-    else:
-        names.extend(["get_evidence", "m4.get_topic_slice"])
-
-    if needs_source_tools(user_text):
-        names.extend(["search_text", "read_file_excerpt"])
-    else:
-        names.append("search_text")
+    if learning_goal in {
+        LearningGoal.ENTRY,
+        LearningGoal.FLOW,
+        LearningGoal.MODULE,
+        LearningGoal.DEPENDENCY,
+        LearningGoal.LAYER,
+    }:
+        names.append("read_file_excerpt")
+    elif needs_source_tools(user_text):
+        names.append("read_file_excerpt")
     return names
 
 

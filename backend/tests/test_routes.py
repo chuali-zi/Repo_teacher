@@ -11,6 +11,10 @@ from backend.routes.repo import submit_repo
 from backend.routes.session import get_session
 
 
+def _fixture_repo(name: str) -> str:
+    return str(Path(__file__).resolve().parent / "fixtures" / name)
+
+
 def _decode_json_response(response_body: bytes) -> dict:
     return json.loads(response_body.decode("utf-8"))
 
@@ -83,9 +87,8 @@ def test_chat_stream_returns_error_event_for_stale_session() -> None:
     assert '"error_code": "invalid_state"' in body
 
 
-def test_analysis_stream_stale_session_error_keeps_requested_session_id(tmp_path: Path) -> None:
-    (tmp_path / "README.md").write_text("# demo\n", encoding="utf-8")
-    session_service.create_repo_session(str(tmp_path))
+def test_analysis_stream_stale_session_error_keeps_requested_session_id() -> None:
+    session_service.create_repo_session(_fixture_repo("source_repo"))
 
     response = asyncio.run(analysis_stream("sess_stale"))
     body = asyncio.run(_read_streaming_response_body(response))

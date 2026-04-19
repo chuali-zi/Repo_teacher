@@ -1,27 +1,31 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from backend.contracts.domain import (
-    AnalysisBundle,
     ConversationState,
     FileTreeSnapshot,
     LlmToolDefinition,
     LlmToolResult,
     RepositoryContext,
-    TeachingSkeleton,
 )
 
 ToolHandler = Callable[[dict[str, Any], "ToolContext"], LlmToolResult]
+_API_TOOL_NAME_PATTERN = re.compile(r"[^a-zA-Z0-9_-]")
+
+
+def to_api_tool_name(tool_name: str) -> str:
+    """Return an OpenAI-compatible function name for an internal tool id."""
+    safe_name = _API_TOOL_NAME_PATTERN.sub("_", tool_name).strip("_")
+    return safe_name or "tool"
 
 
 @dataclass(frozen=True)
 class ToolContext:
     repository: RepositoryContext
     file_tree: FileTreeSnapshot
-    analysis: AnalysisBundle | None = None
-    teaching_skeleton: TeachingSkeleton | None = None
     conversation: ConversationState | None = None
 
 
@@ -50,11 +54,14 @@ class ToolSpec:
             deterministic=self.deterministic,
         )
 
+    def api_tool_name(self) -> str:
+        return to_api_tool_name(self.tool_name)
+
     def openai_schema(self) -> dict[str, Any]:
         return {
             "type": "function",
             "function": {
-                "name": self.tool_name,
+                "name": self.api_tool_name(),
                 "description": self.description,
                 "parameters": self.parameters,
             },

@@ -5,7 +5,6 @@ import type {
   MessageDto,
   SessionSnapshotDto
 } from '../types/contracts';
-import { hasRenderableMessageText } from '../utils/messageText';
 
 export const initialClientSessionStore: ClientSessionStore = {
   sessionId: null,
@@ -156,7 +155,7 @@ function upsertMessage(messages: MessageDto[], next: MessageDto): MessageDto[] {
 }
 
 function mergeMessage(current: MessageDto, next: MessageDto): MessageDto {
-  const nextHasRawText = hasRenderableMessageText(next.raw_text);
+  const nextHasRawText = next.raw_text.trim().length > 0;
   return {
     ...current,
     ...next,

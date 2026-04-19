@@ -51,20 +51,23 @@ def parse_final_answer(
 ) -> StructuredAnswer | InitialReportAnswer:
     visible_text, payload = _extract_payload(raw_text)
     if scenario == PromptScenario.INITIAL_REPORT:
+        suggestions = _parse_suggestions(
+            payload.get("suggestions")
+            or payload.get("initial_report_content", {}).get("suggested_next_questions")
+        )
+        initial_report_content = _parse_initial_report_content(payload, visible_text)
+        initial_report_content.suggested_next_questions = suggestions
         return InitialReportAnswer(
             answer_id=_new_answer_id(),
             message_type=MessageType.INITIAL_REPORT,
             raw_text=visible_text,
-            initial_report_content=_parse_initial_report_content(payload, visible_text),
-            suggestions=_parse_suggestions(
-                payload.get("suggestions")
-                or payload.get("initial_report_content", {}).get("suggested_next_questions")
-            ),
+            initial_report_content=initial_report_content,
+            suggestions=suggestions,
             used_evidence_refs=_string_list(payload.get("used_evidence_refs")),
             warnings=_parse_warnings(payload.get("warnings")),
         )
     structured_content = _parse_structured_content(payload, visible_text)
-    suggestions = structured_content.next_steps[:3] or _fallback_suggestions(visible_text)
+    suggestions = structured_content.next_steps[:3]
     structured_content.next_steps = suggestions
     return StructuredAnswer(
         answer_id=_new_answer_id(),
@@ -125,7 +128,7 @@ def _parse_initial_report_content(payload: dict, visible_text: str) -> InitialRe
         ),
         reading_path_preview=[],
         unknown_section=[],
-        suggested_next_questions=_fallback_suggestions(visible_text),
+        suggested_next_questions=[],
     )
 
 
@@ -180,10 +183,7 @@ def _best_effort_initial_report_content(
         ),
         reading_path_preview=_safe_model_list(content.get("reading_path_preview"), "reading_step"),
         unknown_section=_safe_model_list(content.get("unknown_section"), "unknown_item"),
-        suggested_next_questions=(
-            _parse_suggestions(content.get("suggested_next_questions"))
-            or _fallback_suggestions(visible_text)
-        ),
+        suggested_next_questions=_parse_suggestions(content.get("suggested_next_questions")),
     )
 
 
@@ -212,8 +212,7 @@ def _parse_structured_content(payload: dict, visible_text: str) -> StructuredMes
         or "这部分需要结合仓库整体结构继续确认。",
         evidence_lines=_fallback_evidence_lines(sections.get("evidence") or visible_text),
         uncertainties=_extract_bullets(sections.get("uncertainty")) or _fallback_uncertainties(),
-        next_steps=_parse_suggestions(sections.get("next_steps"))
-        or _fallback_suggestions(visible_text),
+        next_steps=[],
     )
 
 

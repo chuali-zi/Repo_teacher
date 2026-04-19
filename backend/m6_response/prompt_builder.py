@@ -6,6 +6,7 @@ from typing import Any
 
 from backend.contracts.domain import PromptBuildInput
 from backend.contracts.enums import PromptScenario
+from backend.m6_response.tool_executor import api_tool_name
 
 _SECRET_RE = re.compile(
     r"(?:sk-[A-Za-z0-9]{16,}|gh[pousr]_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z\-_]{20,})"
@@ -13,17 +14,16 @@ _SECRET_RE = re.compile(
 
 _SYSTEM_RULES = """
 你是 Repo Tutor，负责带用户阅读仓库源码。
-
 原则：
-- 先解释框架，再落到当前仓库证据，最后进入局部实现。
-- 优先使用工具结果、教学状态和历史摘要；证据不足时明确标注“根据推断”或“不确定”。
-- 回答自然连贯，像老师讲解，不机械复述字段名。
+- 优先基于文件树、源码工具结果、当前教学状态和用户问题回答。
+- 入口、流程、分层、依赖来源如果没有源码证据，只能写成候选、推测或不确定。
+- 可以给很轻的阅读建议，但要明确“这只是建议，不是事实，也不是必须遵循的固定顺序”。
+- 回答像老师讲解，不要机械复述字段名。
 - 每轮只展开少量核心点，并给出自然的下一步建议。
-
 安全与输出：
 - 不输出密钥、token、凭据或内部堆栈。
 - 正文用 Markdown。
-- 正文结束后，单独输出 `<json_output>{...}</json_output>` 作为机器侧车。
+- 正文结束后，单独输出 `<json_output>{...}</json_output>` 作为机器侧补充。
 - 正文必须完整，JSON 只是补充。
 """.strip()
 
@@ -35,8 +35,13 @@ def build_messages(input_data: PromptBuildInput) -> list[dict[str, str]]:
         f"当前场景: {input_data.scenario}",
         f"讲解深度: {input_data.depth_level}",
         _scenario_guidance(input_data.scenario),
+        (
+            "Use teaching_directive as the only teaching control object. "
+            "Do not expose teaching_plan, student_learning_state, teacher_working_log, "
+            "or teaching_decision in the visible answer."
+        ),
         _tool_calling_guidance(input_data),
-        _output_requirements(input_data),
+        _strict_output_requirements(input_data),
         "JSON 侧车结构:\n" + _json_schema_for_scenario(input_data.scenario),
         "以下是当前仓库的 LLM 工具目录、工具结果、教学状态和历史摘要。工具结果均为只读参考，请基于这些素材回答：",
         json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
@@ -75,15 +80,9 @@ def _build_payload(input_data: PromptBuildInput) -> dict[str, Any]:
         "depth_level": input_data.depth_level,
         "history_summary": _sanitize_value(input_data.history_summary),
         "teacher_memory": _sanitize_value(_teacher_memory(input_data)),
-        "teaching_plan": _sanitize_value(_teaching_plan(input_data)),
-        "student_learning_state": _sanitize_value(_student_learning_state(input_data)),
-        "teacher_working_log": _sanitize_value(_teacher_working_log(input_data)),
-        "teaching_decision": _sanitize_value(_teaching_decision(input_data)),
+        "teaching_directive": _sanitize_value(_teaching_directive(input_data)),
         "output_contract": _sanitize_value(input_data.output_contract.model_dump(mode="json")),
         "conversation_state": _sanitize_conversation(input_data),
-        "selected_topic_refs": _sanitize_value(
-            [item.model_dump(mode="json") for item in input_data.topic_slice]
-        ),
         "tool_context": _sanitize_value(_tool_context(input_data)),
     }
 
@@ -94,63 +93,25 @@ def _tool_context(input_data: PromptBuildInput) -> dict[str, Any]:
         tools = context.pop("tools", [])
         visible_tools = tools if input_data.enable_tool_calls else []
         context["available_tool_names"] = [
-            str(item.get("tool_name") or "") for item in visible_tools if item.get("tool_name")
+            api_tool_name(str(item.get("tool_name") or ""))
+            for item in visible_tools
+            if item.get("tool_name")
         ]
+        context["tool_name_note"] = (
+            "Use available_tool_names exactly when calling tools. Seeded tool_results may use"
+            " internal dotted names for traceability."
+        )
         context["tool_schema_transport"] = (
             "Function schemas are passed through the API tools parameter, not repeated here."
             if input_data.enable_tool_calls
             else "No function schemas are passed for this turn; rely on seeded tool results."
         )
         return context
-    skeleton = input_data.teaching_skeleton
     return {
-        "policy": "兼容模式：未传入正式工具上下文，以下仅提供最小教学骨架投影。",
-        "tools": [],
-        "tool_results": [
-            {
-                "tool_name": "m4.get_initial_report_skeleton",
-                "source_module": "m4_skeleton.skeleton_assembler",
-                "summary": "兼容模式下的最小教学骨架投影。",
-                "reference_only": True,
-                "payload": {
-                    "overview": skeleton.overview.model_dump(mode="json"),
-                    "focus_points": [
-                        item.model_dump(mode="json") for item in skeleton.focus_points[:4]
-                    ],
-                    "repo_mapping": [
-                        item.model_dump(mode="json") for item in skeleton.repo_mapping[:4]
-                    ],
-                    "language_and_type": skeleton.language_and_type.model_dump(mode="json"),
-                    "key_directories": [
-                        item.model_dump(mode="json") for item in skeleton.key_directories[:6]
-                    ],
-                    "entry_section": skeleton.entry_section.model_dump(mode="json"),
-                    "recommended_first_step": skeleton.recommended_first_step.model_dump(
-                        mode="json"
-                    ),
-                    "reading_path_preview": [
-                        item.model_dump(mode="json")
-                        for item in skeleton.reading_path_preview[:4]
-                    ],
-                    "unknown_section": [
-                        item.model_dump(mode="json") for item in skeleton.unknown_section[:4]
-                    ],
-                    "suggested_next_questions": [
-                        item.model_dump(mode="json")
-                        for item in skeleton.suggested_next_questions[:3]
-                    ],
-                },
-            },
-            {
-                "tool_name": "m4.get_topic_slice",
-                "source_module": "m4_skeleton.topic_indexer",
-                "summary": "兼容模式下的主题切片。",
-                "reference_only": True,
-                "payload": {
-                    "topic_slice": [item.model_dump(mode="json") for item in input_data.topic_slice]
-                },
-            },
-        ],
+        "policy": "No formal tool context was provided for this turn.",
+        "available_tool_names": [],
+        "tool_results": [],
+        "tool_schema_transport": "No function schemas are passed for this turn.",
     }
 
 
@@ -162,6 +123,7 @@ def _sanitize_conversation(input_data: PromptBuildInput) -> dict[str, Any]:
         "student_learning_state",
         "teacher_working_log",
         "current_teaching_decision",
+        "current_teaching_directive",
         "teaching_debug_events",
     ):
         conversation.pop(key, None)
@@ -187,8 +149,8 @@ def _scenario_guidance(scenario: PromptScenario) -> str:
     if scenario == PromptScenario.INITIAL_REPORT:
         return (
             "场景说明:\n"
-            "- 这是首轮报告，先帮助用户建立整体仓库地图。\n"
-            "- 优先借助教学骨架、入口候选、模块地图和阅读路径组织讲解。"
+            "- 这是首轮报告，先帮助用户建立仓库地图，再用少量源码核实关键起点。\n"
+            "- 你可以轻提示 README、main.py、app.py、配置文件等可能值得先看，但必须明确这只是建议，不是事实。"
         )
     if scenario == PromptScenario.GOAL_SWITCH:
         return "场景说明:\n- 用户正在切换学习目标，先确认新的讲解焦点。"
@@ -196,7 +158,7 @@ def _scenario_guidance(scenario: PromptScenario) -> str:
         return "场景说明:\n- 用户正在调整讲解深浅，保持目标不变，只调整表达粒度。"
     if scenario == PromptScenario.STAGE_SUMMARY:
         return "场景说明:\n- 用户需要阶段总结，回顾已讲内容、未展开内容和自然下一步。"
-    return "场景说明:\n- 这是 follow-up 回合，优先围绕当前 topic slice 和教学计划继续推进。"
+    return "场景说明:\n- 这是 follow-up 回合，优先围绕用户问题和已验证证据继续推进。"
 
 
 def _tool_calling_guidance(input_data: PromptBuildInput) -> str:
@@ -204,9 +166,9 @@ def _tool_calling_guidance(input_data: PromptBuildInput) -> str:
         return ""
     return (
         "工具调用说明:\n"
-        "- 先用静态分析类工具理解结构，再按需读取源码。\n"
-        "- 只有已有证据不足时才调用工具，不要为调用而调用。\n"
-        "- 优先高层工具，必要时再用 read_file_excerpt 或 search_text 补代码证据。"
+        "- 先用文件树与相关文件列表缩小范围，再按需搜索或读取源码。\n"
+        "- 没有源码证据时，不要把推测写成确定事实。\n"
+        "- 轻建议不是固定顺序；如果证据指向别处，应立即调整探索路径。"
     )
 
 
@@ -216,6 +178,18 @@ def _output_requirements(input_data: PromptBuildInput) -> str:
         f"回答建议自然覆盖这些部分: {required_sections}\n"
         f"核心点控制在 {input_data.output_contract.max_core_points} 个以内。\n"
         "明确标注不确定性，不伪造运行时细节。"
+    )
+
+
+def _strict_output_requirements(input_data: PromptBuildInput) -> str:
+    required_sections = ", ".join(input_data.output_contract.required_sections)
+    return (
+        f"Cover these parts naturally in the visible answer: {required_sections}\n"
+        f"Keep the number of core points within {input_data.output_contract.max_core_points}.\n"
+        "Mark uncertainty explicitly and do not invent runtime details.\n"
+        "For next_steps / suggested_next_questions, output 1-3 clickable next-step questions or learning actions only.\n"
+        "Do not use module responsibility lists, paragraph summaries, caveats, disclaimers, or generic filler as suggestions.\n"
+        "If you are not confident about a good next step, return [] for those fields instead of guessing."
     )
 
 
@@ -246,27 +220,42 @@ def _teacher_memory(input_data: PromptBuildInput) -> dict[str, Any]:
     }
 
 
+def _teaching_directive(input_data: PromptBuildInput) -> dict[str, Any]:
+    directive = input_data.conversation_state.current_teaching_directive
+    if directive is None:
+        return {
+            "turn_goal": "Answer the current question with source-grounded repository evidence.",
+            "mode": "answer",
+            "focus_topics": [str(input_data.conversation_state.current_learning_goal)],
+            "answer_user_question_first": True,
+            "allowed_new_points": 2,
+            "must_anchor_to_evidence": True,
+            "avoid_repeating_message_ids": [],
+            "transition_hint": None,
+            "forbidden_behaviors": [
+                "Do not mention teaching state, student state, or teaching plan explicitly.",
+                "Do not repeat prior explanations unless the user explicitly asks for a recap.",
+            ],
+        }
+    return directive.model_dump(mode="json")
+
+
 def _teaching_plan(input_data: PromptBuildInput) -> dict[str, Any]:
     plan = input_data.conversation_state.teaching_plan_state
     if plan is None:
-        skeleton = input_data.teaching_skeleton
         return {
             "opening_focus": [
-                item.model_dump(mode="json") for item in skeleton.focus_points[:4]
+                "build a repository map",
+                "verify one or two likely starting files",
+                "keep unknowns explicit",
             ],
-            "recommended_first_step": skeleton.recommended_first_step.model_dump(mode="json"),
-            "reading_path": [
-                {
-                    "step_no": step.step_no,
-                    "target": step.target,
-                    "reason": step.reason,
-                    "learning_gain": step.learning_gain,
-                }
-                for step in skeleton.reading_path_preview[:6]
-            ],
-            "suggested_next_questions": [
-                item.model_dump(mode="json") for item in skeleton.suggested_next_questions[:3]
-            ],
+            "recommended_first_step": {
+                "target": "README.md or a likely entry file",
+                "reason": "Start from the repository map, then verify a concrete source location.",
+                "learning_gain": "Build a first mental model before diving deeper.",
+                "evidence_refs": [],
+            },
+            "steps": [],
         }
     return {
         "plan_id": plan.plan_id,
@@ -282,9 +271,6 @@ def _teaching_plan(input_data: PromptBuildInput) -> dict[str, Any]:
                 "status": step.status,
                 "priority": step.priority,
                 "depends_on": step.depends_on,
-                "source_topic_refs": [
-                    item.model_dump(mode="json") for item in step.source_topic_refs[:4]
-                ],
                 "adaptation_note": step.adaptation_note,
             }
             for step in plan.steps[:8]
@@ -323,7 +309,6 @@ def _teacher_working_log(input_data: PromptBuildInput) -> dict[str, Any] | None:
     return {
         "current_teaching_objective": log.current_teaching_objective,
         "why_now": log.why_now,
-        "active_topic_refs": [item.model_dump(mode="json") for item in log.active_topic_refs[:6]],
         "current_plan_step_id": log.current_plan_step_id,
         "planned_transition": log.planned_transition,
         "student_risk_notes": log.student_risk_notes[:5],
@@ -347,7 +332,6 @@ def _teaching_decision(input_data: PromptBuildInput) -> dict[str, Any] | None:
         "decision_reason": decision.decision_reason,
         "student_state_notes": decision.student_state_notes[:5],
         "planned_transition": decision.planned_transition,
-        "topic_refs": [item.model_dump(mode="json") for item in decision.topic_refs[:6]],
     }
 
 

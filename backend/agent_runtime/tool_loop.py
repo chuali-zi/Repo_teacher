@@ -8,18 +8,16 @@ from dataclasses import dataclass
 from time import monotonic
 from typing import Any
 
-from backend.contracts.domain import (
-    AnalysisBundle,
-    FileTreeSnapshot,
-    PromptBuildInput,
-    RepositoryContext,
-    TeachingSkeleton,
-)
 from backend.agent_runtime.tool_selection import select_tools_for_prompt_input
-from backend.m6_response.llm_caller import StreamResult, ToolCallRequest, stream_llm_response_with_tools
+from backend.contracts.domain import FileTreeSnapshot, PromptBuildInput, RepositoryContext
 from backend.m6_response.budgets import output_token_budget_for_scenario
+from backend.m6_response.llm_caller import (
+    StreamResult,
+    ToolCallRequest,
+    stream_llm_response_with_tools,
+)
 from backend.m6_response.prompt_builder import build_messages
-from backend.m6_response.tool_executor import execute_tool_call, normalize_tool_name
+from backend.m6_response.tool_executor import api_tool_name, execute_tool_call, normalize_tool_name
 
 ToolAwareLlmStreamer = Any
 ActivityEmitter = Any
@@ -62,32 +60,26 @@ async def stream_answer_text_with_tools(
     *,
     repository: RepositoryContext,
     file_tree: FileTreeSnapshot,
-    analysis: AnalysisBundle | None = None,
-    teaching_skeleton: TeachingSkeleton | None = None,
     tool_streamer: ToolAwareLlmStreamer = stream_llm_response_with_tools,
     on_activity: ActivityEmitter | None = None,
     timeouts: ToolLoopTimeouts = DEFAULT_TOOL_LOOP_TIMEOUTS,
 ) -> AsyncIterator[ToolStreamItem]:
     messages: list[dict[str, Any]] = build_messages(input_data)
+    selected_tool_schemas = list(select_tools_for_prompt_input(input_data).openai_schemas)
     max_tool_rounds = max(input_data.max_tool_rounds, 0)
+    max_tokens = output_token_budget_for_scenario(input_data.scenario)
     tool_rounds_used = 0
     round_index = 0
-    selected_tool_schemas = list(select_tools_for_prompt_input(input_data).openai_schemas)
-    max_tokens = output_token_budget_for_scenario(input_data.scenario)
 
     while True:
         queue: asyncio.Queue[ToolStreamItem | None] = asyncio.Queue()
         round_started_at = monotonic()
-        saw_visible_content = False
-        emitted_text_chunks: list[str] = []
+        emitted_visible_text = False
+        emitted_chunks: list[str] = []
         allow_tools = tool_rounds_used < max_tool_rounds
         active_tool_schemas = selected_tool_schemas if allow_tools else []
 
-        async def _emit_activity(
-            phase: str,
-            summary: str,
-            **extra: Any,
-        ) -> ToolStreamActivity:
+        async def _emit_activity(phase: str, summary: str, **extra: Any) -> ToolStreamActivity:
             item = await _make_activity_item(
                 on_activity,
                 round_started_at,
@@ -104,7 +96,7 @@ async def stream_answer_text_with_tools(
                 timeouts.thinking_notice_seconds,
                 _emit_activity,
                 "thinking",
-                "正在梳理你的问题与已有上下文",
+                "Thinking through the question and current evidence.",
             )
         )
         search_task = asyncio.create_task(
@@ -112,12 +104,12 @@ async def stream_answer_text_with_tools(
                 timeouts.code_search_notice_seconds,
                 _emit_activity,
                 "slow_warning",
-                "正在定位相关代码与证据",
+                "Still locating relevant source evidence.",
             )
         )
 
         async def _on_delta(chunk: str) -> None:
-            emitted_text_chunks.append(chunk)
+            emitted_chunks.append(chunk)
             await queue.put(ToolStreamTextDelta(chunk))
 
         async def _runner() -> StreamResult:
@@ -139,9 +131,9 @@ async def stream_answer_text_with_tools(
                 if item is None:
                     break
                 if isinstance(item, ToolStreamTextDelta):
-                    saw_visible_content = True
+                    emitted_visible_text = True
                 yield item
-            result: StreamResult = await runner_task
+            result = await runner_task
         except BaseException:
             thinking_task.cancel()
             search_task.cancel()
@@ -155,9 +147,9 @@ async def stream_answer_text_with_tools(
             thinking_task.cancel()
             search_task.cancel()
 
-        if not emitted_text_chunks and result.content_chunks:
+        if not emitted_chunks and result.content_chunks:
             for chunk in result.content_chunks:
-                saw_visible_content = True
+                emitted_visible_text = True
                 yield ToolStreamTextDelta(chunk)
 
         if not result.tool_calls:
@@ -169,38 +161,38 @@ async def stream_answer_text_with_tools(
                 round_started_at,
                 round_index,
                 "degraded_continue",
-                "模型在最终轮仍请求工具，已忽略并结束本轮工具循环",
+                "The model asked for more tools after the tool limit was reached.",
             )
             return
 
         tool_calls = _normalize_tool_calls(result.tool_calls, round_index)
-        if not saw_visible_content:
+        if not emitted_visible_text:
             yield await _make_activity_item(
                 on_activity,
                 round_started_at,
                 round_index,
                 "planning_tool_call",
-                "正在决定要查看哪些代码证据",
+                "Choosing which repository evidence to verify next.",
             )
 
-        full_content = "".join(result.content_chunks)
-        assistant_msg: dict[str, Any] = {
+        assistant_message: dict[str, Any] = {
             "role": "assistant",
             "tool_calls": [
                 {
-                    "id": tc.call_id,
+                    "id": tool_call.call_id,
                     "type": "function",
                     "function": {
-                        "name": tc.function_name,
-                        "arguments": tc.arguments_json,
+                        "name": tool_call.function_name,
+                        "arguments": tool_call.arguments_json,
                     },
                 }
-                for tc in tool_calls
+                for tool_call in tool_calls
             ],
         }
+        full_content = "".join(result.content_chunks)
         if full_content:
-            assistant_msg["content"] = full_content
-        messages.append(assistant_msg)
+            assistant_message["content"] = full_content
+        messages.append(assistant_message)
 
         async for activity in _execute_tool_batch(
             tool_calls,
@@ -208,8 +200,6 @@ async def stream_answer_text_with_tools(
             round_index=round_index,
             repository=repository,
             file_tree=file_tree,
-            analysis=analysis,
-            teaching_skeleton=teaching_skeleton,
             on_activity=on_activity,
             timeouts=timeouts,
         ):
@@ -229,8 +219,8 @@ async def stream_answer_text_with_tools(
                     {
                         "role": "system",
                         "content": (
-                            "刚才的工具调用失败或超时。请不要继续等待该工具；"
-                            "改用已有工具结果和上下文保守回答，并明确标注不确定性。"
+                            "The previous tool call failed or timed out. Continue with the existing"
+                            " evidence, stay conservative, and mark uncertainty clearly."
                         ),
                     }
                 )
@@ -239,26 +229,29 @@ async def stream_answer_text_with_tools(
                     round_started_at,
                     round_index,
                     "degraded_continue",
-                    "工具不可用，改为基于已有证据继续回答",
+                    "A tool failed, so the answer is continuing from existing evidence only.",
                 )
-            else:
-                arguments = _safe_json_loads(activity.tool_call.arguments_json)
-                yield await _make_activity_item(
-                    on_activity,
-                    round_started_at,
-                    round_index,
-                    "tool_succeeded",
-                    f"{activity.tool_call.function_name} 已返回，继续组织回答",
-                    tool_name=activity.tool_call.function_name,
-                    tool_arguments=arguments,
-                )
+                continue
+
+            yield await _make_activity_item(
+                on_activity,
+                round_started_at,
+                round_index,
+                "tool_succeeded",
+                f"{activity.tool_call.function_name} returned successfully.",
+                tool_name=activity.tool_call.function_name,
+                tool_arguments=_safe_json_loads(activity.tool_call.arguments_json),
+            )
 
         tool_rounds_used += 1
         if tool_rounds_used >= max_tool_rounds:
             messages.append(
                 {
                     "role": "system",
-                    "content": "工具调用轮次已达上限。接下来直接完成回答，不要再调用工具。",
+                    "content": (
+                        "The tool round limit has been reached. Finish the answer directly without"
+                        " asking for more tools."
+                    ),
                 }
             )
             yield await _make_activity_item(
@@ -266,7 +259,7 @@ async def stream_answer_text_with_tools(
                 round_started_at,
                 round_index,
                 "degraded_continue",
-                "已达到工具轮次上限，直接完成回答",
+                "Tool round limit reached; finishing without more tool calls.",
             )
             async for item in _stream_final_answer_without_tools(
                 messages,
@@ -283,10 +276,10 @@ async def stream_answer_text_with_tools(
             round_started_at,
             round_index,
             "waiting_llm_after_tool",
-            "已拿到工具结果，正在组织回答",
+            "Tool results are ready; asking the model to continue.",
         )
         round_index += 1
-        continue
+
 
 async def _execute_tool_batch(
     tool_calls: list[ToolCallRequest],
@@ -295,8 +288,6 @@ async def _execute_tool_batch(
     round_index: int,
     repository: RepositoryContext,
     file_tree: FileTreeSnapshot,
-    analysis: AnalysisBundle | None,
-    teaching_skeleton: TeachingSkeleton | None,
     on_activity: ActivityEmitter | None,
     timeouts: ToolLoopTimeouts,
 ) -> AsyncIterator[ToolStreamActivity | _ToolExecution]:
@@ -304,11 +295,7 @@ async def _execute_tool_batch(
     task_order: list[str] = []
     tasks: list[asyncio.Task[_ToolExecution]] = []
 
-    async def _tool_activity(
-        phase: str,
-        summary: str,
-        **extra: Any,
-    ) -> None:
+    async def _tool_activity(phase: str, summary: str, **extra: Any) -> None:
         item = await _make_activity_item(
             on_activity,
             round_started_at,
@@ -337,8 +324,6 @@ async def _execute_tool_batch(
                     tool_call,
                     repository=repository,
                     file_tree=file_tree,
-                    analysis=analysis,
-                    teaching_skeleton=teaching_skeleton,
                     on_activity=_tool_activity,
                     timeouts=timeouts,
                 )
@@ -362,10 +347,7 @@ async def _execute_tool_batch(
         yield activity_queue.get_nowait()
 
     results = await asyncio.gather(*tasks)
-    ordered = sorted(
-        results,
-        key=lambda item: task_order.index(item.tool_call.call_id),
-    )
+    ordered = sorted(results, key=lambda item: task_order.index(item.tool_call.call_id))
     for result in ordered:
         yield result
 
@@ -380,10 +362,10 @@ async def _stream_final_answer_without_tools(
 ) -> AsyncIterator[ToolStreamItem]:
     queue: asyncio.Queue[ToolStreamItem | None] = asyncio.Queue()
     round_started_at = monotonic()
-    emitted_text_chunks: list[str] = []
+    emitted_chunks: list[str] = []
 
     async def _on_delta(chunk: str) -> None:
-        emitted_text_chunks.append(chunk)
+        emitted_chunks.append(chunk)
         await queue.put(ToolStreamTextDelta(chunk))
 
     async def _runner() -> StreamResult:
@@ -414,7 +396,7 @@ async def _stream_final_answer_without_tools(
             pass
         raise
 
-    if not emitted_text_chunks and result.content_chunks:
+    if not emitted_chunks and result.content_chunks:
         for chunk in result.content_chunks:
             yield ToolStreamTextDelta(chunk)
 
@@ -424,7 +406,7 @@ async def _stream_final_answer_without_tools(
             round_started_at,
             round_index,
             "degraded_continue",
-            "模型在最终轮仍请求工具，已忽略并结束本轮工具循环",
+            "The model still requested tools during the final no-tool round.",
         )
 
 
@@ -449,17 +431,14 @@ async def _make_activity_item(
     return ToolStreamActivity(payload=payload, recorded_event=recorded_event)
 
 
-def _normalize_tool_calls(
-    tool_calls: list[ToolCallRequest],
-    round_index: int,
-) -> list[ToolCallRequest]:
+def _normalize_tool_calls(tool_calls: list[ToolCallRequest], round_index: int) -> list[ToolCallRequest]:
     normalized: list[ToolCallRequest] = []
-    for index, tc in enumerate(tool_calls, start=1):
+    for index, tool_call in enumerate(tool_calls, start=1):
         normalized.append(
             ToolCallRequest(
-                call_id=tc.call_id or f"call_local_{round_index + 1}_{index}",
-                function_name=normalize_tool_name(tc.function_name or "__missing_tool_name"),
-                arguments_json=tc.arguments_json or "{}",
+                call_id=tool_call.call_id or f"call_local_{round_index + 1}_{index}",
+                function_name=api_tool_name(tool_call.function_name or "__missing_tool_name"),
+                arguments_json=tool_call.arguments_json or "{}",
             )
         )
     return normalized
@@ -514,8 +493,6 @@ async def _execute_tool_call_with_timeout(
     *,
     repository: RepositoryContext,
     file_tree: FileTreeSnapshot,
-    analysis: AnalysisBundle | None,
-    teaching_skeleton: TeachingSkeleton | None,
     on_activity: ActivityEmitter,
     timeouts: ToolLoopTimeouts,
 ) -> _ToolExecution:
@@ -528,8 +505,6 @@ async def _execute_tool_call_with_timeout(
             arguments,
             repository=repository,
             file_tree=file_tree,
-            analysis=analysis,
-            teaching_skeleton=teaching_skeleton,
         )
     )
     soft_timeout_fired = False
@@ -541,7 +516,7 @@ async def _execute_tool_call_with_timeout(
             await _maybe_await(
                 on_activity(
                     "slow_warning",
-                    f"{tool_call.function_name} 用时较久，继续等待一小段时间",
+                    f"{tool_call.function_name} is taking longer than expected.",
                     tool_name=tool_call.function_name,
                     tool_arguments=arguments,
                     soft_timed_out=True,
@@ -560,7 +535,7 @@ async def _execute_tool_call_with_timeout(
                 await _maybe_await(
                     on_activity(
                         "tool_failed",
-                        f"{tool_call.function_name} 超时，改用已有证据继续回答",
+                        f"{tool_call.function_name} timed out.",
                         tool_name=tool_call.function_name,
                         tool_arguments=arguments,
                         failed=True,
@@ -574,7 +549,7 @@ async def _execute_tool_call_with_timeout(
                         tool_call.function_name,
                         arguments,
                         reason="tool_timeout",
-                        detail="工具调用超时",
+                        detail="Tool call timed out.",
                         elapsed_ms=int((monotonic() - started_at) * 1000),
                         soft_timed_out=soft_timeout_fired,
                     ),
@@ -589,7 +564,7 @@ async def _execute_tool_call_with_timeout(
         await _maybe_await(
             on_activity(
                 "tool_failed",
-                f"{tool_call.function_name} 失败，改用已有证据继续回答",
+                f"{tool_call.function_name} failed.",
                 tool_name=tool_call.function_name,
                 tool_arguments=arguments,
                 failed=True,
@@ -644,23 +619,18 @@ def _safe_json_loads(value: str) -> dict[str, Any]:
 
 
 def _tool_summary(tool_name: str, arguments_json: str) -> str:
+    normalized_name = normalize_tool_name(tool_name)
     arguments = _safe_json_loads(arguments_json)
-    if tool_name == "get_repo_surfaces":
-        return f"正在查看仓库分区（{arguments.get('mode', 'teaching')} 模式）"
-    if tool_name == "get_entry_candidates":
-        return f"正在核对入口候选（{arguments.get('mode', 'teaching')} 模式）"
-    if tool_name == "get_module_map":
-        return f"正在整理模块地图（{arguments.get('mode', 'teaching')} 模式）"
-    if tool_name == "get_reading_path":
-        goal = str(arguments.get("goal") or "当前目标").strip()
-        return f"正在生成 {goal} 的阅读路径"
-    if tool_name == "get_evidence":
-        target = str(arguments.get("target") or "当前结论").strip()
-        return f"正在收集 {target} 的证据"
-    if tool_name == "search_text":
+    if normalized_name == "search_text":
         query = str(arguments.get("query") or "").strip()
-        return f"正在搜索 {query!r} 相关代码" if query else "正在搜索相关代码"
-    if tool_name == "read_file_excerpt":
+        return f"Searching source files for {query!r}" if query else "Searching source files"
+    if normalized_name == "read_file_excerpt":
         path = str(arguments.get("relative_path") or "").strip()
-        return f"正在读取 {path} 的代码摘录" if path else "正在读取代码摘录"
-    return f"正在执行 {tool_name}"
+        return f"Reading {path}" if path else "Reading a source excerpt"
+    if normalized_name == "m2.list_relevant_files":
+        return "Listing relevant repository files"
+    if normalized_name == "m2.get_file_tree_summary":
+        return "Reviewing the file-tree summary"
+    if normalized_name == "m1.get_repository_context":
+        return "Reviewing repository context"
+    return f"Running {normalized_name}"

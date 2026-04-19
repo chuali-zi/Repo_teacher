@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 from backend.contracts.domain import (
     ExplainedItemRef,
     InitialReportAnswer,
@@ -8,7 +10,6 @@ from backend.contracts.domain import (
     PromptBuildInput,
     SessionContext,
     StructuredAnswer,
-    TopicRef,
 )
 from backend.contracts.enums import (
     DepthLevel,
@@ -21,44 +22,45 @@ from backend.contracts.enums import (
     TeachingStage,
 )
 from backend.llm_tools import build_llm_tool_context
-from backend.m5_session.common import GOAL_KEYWORDS, TOPIC_ATTRS_BY_GOAL, utc_now
+from backend.m5_session.common import GOAL_KEYWORDS, utc_now
 from backend.m5_session.teaching_state import (
     append_teaching_debug_event,
     build_initial_student_learning_state,
     build_initial_teacher_working_log,
     build_initial_teaching_plan,
+    build_teaching_directive,
     build_teaching_decision,
-    plan_based_suggestions,
     update_after_initial_report,
     update_after_structured_answer,
 )
-from backend.m6_response.suggestion_generator import generate_next_step_suggestions
+
+ENV_MAX_TOOL_ROUNDS = "REPO_TUTOR_MAX_TOOL_ROUNDS"
+DEFAULT_MAX_TOOL_ROUNDS = 50
 
 
 class TeachingService:
     def build_initial_report_prompt_input(self, session: SessionContext) -> PromptBuildInput:
-        topic_slice = self.topic_slice_for_goal(session.teaching_skeleton, LearningGoal.OVERVIEW)
-        user_text = "请先帮我建立这个仓库的整体理解，并给出一条主动引导的阅读计划。"
+        max_tool_rounds = load_max_tool_rounds()
+        user_text = "请先帮我建立这个仓库的整体理解，并主动核实一两个关键源码起点。"
         self.prepare_teaching_decision(
             session,
             user_text=user_text,
             scenario=PromptScenario.INITIAL_REPORT,
-            topic_slice=topic_slice,
+            message_id=None,
         )
         return PromptBuildInput(
             scenario=PromptScenario.INITIAL_REPORT,
             user_message=user_text,
-            teaching_skeleton=session.teaching_skeleton,
-            topic_slice=topic_slice,
             tool_context=self.build_tool_context(
                 session,
-                topic_slice,
                 scenario=PromptScenario.INITIAL_REPORT,
             ),
             conversation_state=session.conversation.model_copy(deep=True),
             history_summary=None,
             depth_level=session.conversation.depth_level,
             output_contract=self.output_contract(session.conversation.depth_level),
+            enable_tool_calls=True,
+            max_tool_rounds=max_tool_rounds,
         )
 
     def build_prompt_input(self, session: SessionContext) -> PromptBuildInput:
@@ -77,20 +79,17 @@ class TeachingService:
 
         session.conversation.current_learning_goal = goal
         session.conversation.depth_level = depth
-        topic_slice = self.topic_slice_for_goal(session.teaching_skeleton, goal)
+        max_tool_rounds = load_max_tool_rounds()
         self.prepare_teaching_decision(
             session,
             user_text=user_text,
             scenario=scenario,
-            topic_slice=topic_slice,
             message_id=last_user_message.message_id,
         )
         return PromptBuildInput(
             scenario=scenario,
             user_message=user_text,
-            teaching_skeleton=session.teaching_skeleton,
-            topic_slice=topic_slice,
-            tool_context=self.build_tool_context(session, topic_slice, scenario=scenario),
+            tool_context=self.build_tool_context(session, scenario=scenario),
             conversation_state=session.conversation.model_copy(deep=True),
             history_summary=self.history_summary(session),
             depth_level=depth,
@@ -100,67 +99,25 @@ class TeachingService:
                 PromptScenario.FOLLOW_UP,
                 PromptScenario.GOAL_SWITCH,
                 PromptScenario.DEPTH_ADJUSTMENT,
+                PromptScenario.STAGE_SUMMARY,
             ),
+            max_tool_rounds=max_tool_rounds,
         )
 
     def build_tool_context(
         self,
         session: SessionContext,
-        topic_slice: list[TopicRef],
         *,
         scenario: PromptScenario | None = None,
     ):
-        if not (
-            session.repository
-            and session.file_tree
-            and session.analysis
-            and session.teaching_skeleton
-        ):
-            raise RuntimeError("Cannot build LLM tool context before analysis completes")
+        if not (session.repository and session.file_tree):
+            raise RuntimeError("Cannot build LLM tool context before file-tree scan completes")
         return build_llm_tool_context(
             repository=session.repository,
             file_tree=session.file_tree,
-            analysis=session.analysis,
-            teaching_skeleton=session.teaching_skeleton,
             conversation=session.conversation,
-            topic_slice=topic_slice,
             scenario=scenario,
         )
-
-    def topic_slice_for_goal(self, skeleton, goal: LearningGoal) -> list[TopicRef]:
-        topic_index = skeleton.topic_index
-        refs: list[TopicRef] = []
-        for attr in TOPIC_ATTRS_BY_GOAL.get(goal, ("structure_refs",)):
-            refs.extend(getattr(topic_index, attr))
-        if not refs:
-            refs = self.all_topic_refs(skeleton)
-        return self.dedupe_topic_refs(refs)[:20]
-
-    def all_topic_refs(self, skeleton) -> list[TopicRef]:
-        topic_index = skeleton.topic_index
-        refs: list[TopicRef] = []
-        for attr in (
-            "structure_refs",
-            "entry_refs",
-            "flow_refs",
-            "layer_refs",
-            "dependency_refs",
-            "module_refs",
-            "reading_path_refs",
-            "unknown_refs",
-        ):
-            refs.extend(getattr(topic_index, attr))
-        return self.dedupe_topic_refs(refs)
-
-    def dedupe_topic_refs(self, refs: list[TopicRef]) -> list[TopicRef]:
-        deduped: list[TopicRef] = []
-        seen: set[str] = set()
-        for ref in refs:
-            if ref.ref_id in seen:
-                continue
-            deduped.append(ref)
-            seen.add(ref.ref_id)
-        return deduped
 
     def history_summary(self, session: SessionContext) -> str | None:
         if session.conversation.history_summary:
@@ -195,15 +152,7 @@ class TeachingService:
         session: SessionContext,
         answer: StructuredAnswer,
     ) -> None:
-        suggestions = self.merge_teacher_suggestions(
-            answer.suggestions,
-            plan_based_suggestions(session.conversation),
-        )
-        if not suggestions:
-            suggestions = generate_next_step_suggestions(
-                session.conversation,
-                self.all_topic_refs(session.teaching_skeleton),
-            )
+        suggestions = answer.suggestions[:3]
         answer.suggestions = suggestions
         answer.structured_content.next_steps = suggestions
 
@@ -212,27 +161,9 @@ class TeachingService:
         session: SessionContext,
         answer: InitialReportAnswer,
     ) -> None:
-        suggestions = self.merge_teacher_suggestions(
-            answer.suggestions,
-            plan_based_suggestions(session.conversation),
-        )
-        if not suggestions:
-            suggestions = session.teaching_skeleton.suggested_next_questions[:3]
+        suggestions = answer.suggestions[:3]
         answer.suggestions = suggestions
         answer.initial_report_content.suggested_next_questions = suggestions
-
-    def merge_teacher_suggestions(self, primary: list, secondary: list) -> list:
-        merged = []
-        seen_texts: set[str] = set()
-        for suggestion in [*primary, *secondary]:
-            if len(merged) >= 3:
-                break
-            text = suggestion.text.strip()
-            if not text or text in seen_texts:
-                continue
-            merged.append(suggestion)
-            seen_texts.add(text)
-        return merged
 
     def prepare_teaching_decision(
         self,
@@ -240,7 +171,6 @@ class TeachingService:
         *,
         user_text: str,
         scenario: PromptScenario,
-        topic_slice: list[TopicRef],
         message_id: str | None = None,
     ) -> None:
         now = utc_now()
@@ -264,14 +194,13 @@ class TeachingService:
             details={
                 "scenario": scenario,
                 "current_learning_goal": session.conversation.current_learning_goal,
-                "topic_ref_count": len(topic_slice),
             },
         )
         if active_step:
             append_teaching_debug_event(
                 session.conversation,
                 TeachingDebugEventType.TEACHING_PLAN_SELECTED,
-                summary=f"选中教学计划步骤：{active_step.title}",
+                summary=f"选中教学计划步骤: {active_step.title}",
                 now=now,
                 message_id=message_id,
                 plan_step_id=active_step.step_id,
@@ -285,10 +214,15 @@ class TeachingService:
             session.conversation,
             user_text=user_text,
             scenario=scenario,
-            topic_slice=topic_slice,
             now=now,
         )
         session.conversation.current_teaching_decision = decision
+        session.conversation.current_teaching_directive = build_teaching_directive(
+            session.conversation,
+            user_text=user_text,
+            scenario=scenario,
+            decision=decision,
+        )
         append_teaching_debug_event(
             session.conversation,
             TeachingDebugEventType.TEACHING_DECISION_BUILT,
@@ -305,11 +239,12 @@ class TeachingService:
         )
 
     def initialize_teaching_state(self, session: SessionContext) -> None:
+        if session.file_tree is None:
+            raise RuntimeError("Cannot initialize teaching state before file tree exists")
         now = utc_now()
-        plan = build_initial_teaching_plan(session.teaching_skeleton, now=now)
-        student_state = build_initial_student_learning_state(session.teaching_skeleton, now=now)
+        plan = build_initial_teaching_plan(session.file_tree, now=now)
+        student_state = build_initial_student_learning_state(now=now)
         teacher_log = build_initial_teacher_working_log(
-            session.teaching_skeleton,
             plan,
             student_state,
             now=now,
@@ -320,7 +255,7 @@ class TeachingService:
         append_teaching_debug_event(
             session.conversation,
             TeachingDebugEventType.TEACHING_STATE_INITIALIZED,
-            summary="已初始化教学计划、学生学习状态和教师工作日志。",
+            summary="已初始化教学计划、学生状态和教师工作日志。",
             now=now,
             plan_step_id=plan.current_step_id,
             details={
@@ -402,7 +337,7 @@ class TeachingService:
         append_teaching_debug_event(
             session.conversation,
             TeachingDebugEventType.STUDENT_STATE_UPDATED,
-            summary="学生学习状态表已根据本轮信号更新。",
+            summary="学生状态表已根据本轮信号更新。",
             now=now,
             message_id=message_id,
             plan_step_id=active_step_id,
@@ -535,3 +470,19 @@ class TeachingService:
             must_mark_uncertainty=True,
             must_use_candidate_wording=True,
         )
+
+
+def load_max_tool_rounds() -> int:
+    raw = os.getenv(ENV_MAX_TOOL_ROUNDS)
+    if raw is None:
+        return DEFAULT_MAX_TOOL_ROUNDS
+    raw = raw.strip()
+    if not raw:
+        return DEFAULT_MAX_TOOL_ROUNDS
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_MAX_TOOL_ROUNDS
+    if value <= 0:
+        return DEFAULT_MAX_TOOL_ROUNDS
+    return value

@@ -642,6 +642,18 @@ class TeachingDecisionSnapshot(ContractModel):
     created_at: datetime
 
 
+class TeachingDirective(ContractModel):
+    turn_goal: str
+    mode: str
+    focus_topics: list[str] = Field(default_factory=list)
+    answer_user_question_first: bool = True
+    allowed_new_points: int = 2
+    must_anchor_to_evidence: bool = True
+    avoid_repeating_message_ids: list[str] = Field(default_factory=list)
+    transition_hint: str | None = None
+    forbidden_behaviors: list[str] = Field(default_factory=list)
+
+
 class TeachingDebugEvent(ContractModel):
     debug_event_id: str
     event_type: TeachingDebugEventType
@@ -669,6 +681,7 @@ class ConversationState(ContractModel):
     student_learning_state: StudentLearningState | None = None
     teacher_working_log: TeacherWorkingLog | None = None
     current_teaching_decision: TeachingDecisionSnapshot | None = None
+    current_teaching_directive: TeachingDirective | None = None
     teaching_debug_events: list[TeachingDebugEvent] = Field(default_factory=list)
     sub_status: ConversationSubStatus | None = None
 
@@ -710,15 +723,13 @@ class LlmToolContext(ContractModel):
 class PromptBuildInput(ContractModel):
     scenario: PromptScenario
     user_message: str | None = None
-    teaching_skeleton: TeachingSkeleton
-    topic_slice: list[TopicRef] = Field(default_factory=list)
     tool_context: LlmToolContext | None = None
     conversation_state: ConversationState
     history_summary: str | None = None
     depth_level: DepthLevel
     output_contract: OutputContract
     enable_tool_calls: bool = False
-    max_tool_rounds: int = 1
+    max_tool_rounds: int = 50
 
 
 class StructuredAnswer(ContractModel):
@@ -796,8 +807,6 @@ class SessionContext(ContractModel):
     updated_at: datetime
     repository: RepositoryContext | None = None
     file_tree: FileTreeSnapshot | None = None
-    analysis: AnalysisBundle | None = None
-    teaching_skeleton: TeachingSkeleton | None = None
     conversation: ConversationState
     last_error: UserFacingError | None = None
     progress_steps: list[ProgressStepStateItem] = Field(default_factory=list)
@@ -809,21 +818,13 @@ class SessionContext(ContractModel):
     @model_validator(mode="after")
     def validate_session_shape(self) -> SessionContext:
         if self.status == SessionStatus.IDLE:
-            if any(
-                item is not None
-                for item in (self.repository, self.file_tree, self.analysis, self.teaching_skeleton)
-            ):
+            if any(item is not None for item in (self.repository, self.file_tree)):
                 raise ValueError("idle sessions must not retain repository analysis state")
             if self.progress_steps:
                 raise ValueError("idle sessions must have empty progress_steps")
         if self.status == SessionStatus.CHATTING:
-            if any(
-                item is None
-                for item in (self.repository, self.file_tree, self.analysis, self.teaching_skeleton)
-            ):
-                raise ValueError(
-                    "chatting sessions must include repository, file_tree, analysis, and teaching_skeleton"
-                )
+            if any(item is None for item in (self.repository, self.file_tree)):
+                raise ValueError("chatting sessions must include repository and file_tree")
         elif self.conversation.sub_status is not None:
             raise ValueError(
                 "conversation sub_status is only valid while session status is chatting"

@@ -775,13 +775,9 @@ function renderMessage(msg) {
     wrap.appendChild(el("div", { class: "bubble bubble--user" }, msg.raw_text || ""));
   } else if (msg.message_type === "error" || msg.error_state) {
     wrap.appendChild(renderErrorBubble(msg));
-  } else if (msg._streaming || (!msg.streaming_complete && !msg.structured_content && !msg.initial_report_content)) {
+  } else if (msg._streaming || !msg.streaming_complete) {
     // streaming: just show the live text, will be replaced when message_completed arrives
     wrap.appendChild(el("pre", { class: "bubble bubble--stream", dataset: { streamId: msg.message_id } }, msg.raw_text || ""));
-  } else if (msg.initial_report_content) {
-    wrap.appendChild(renderInitialReport(msg));
-  } else if (msg.structured_content) {
-    wrap.appendChild(renderStructuredAnswer(msg));
   } else {
     wrap.appendChild(renderRawMessage(msg));
     const suggestions = collectMessageSuggestions(msg);
@@ -870,11 +866,7 @@ function renderRawMessage(msg) {
 }
 
 function collectMessageSuggestions(msg) {
-  const sources = [
-    msg.suggestions,
-    msg.initial_report_content?.suggested_next_questions,
-    msg.structured_content?.next_steps,
-  ];
+  const sources = [msg.suggestions];
   const suggestions = [];
   const seen = new Set();
   for (const source of sources) {
@@ -914,48 +906,6 @@ function renderErrorBubble(msg) {
     el("p", null, err.message),
     msg.error_state?.partial_text_available && el("pre", { class: "bubble--stream", style: { marginTop: "8px" } }, msg.raw_text || ""),
   );
-}
-
-// ---------- structured answer (six sections) ----------
-
-function renderStructuredAnswer(msg) {
-  const sc = msg.structured_content;
-  const wrap = el("div", { class: "bubble" });
-  const inner = el("div", { class: "answer" });
-  if (sc.focus) inner.appendChild(el("div", { class: "answer__focus" }, sc.focus));
-  if (sc.direct_explanation) {
-    inner.appendChild(renderSection("DIRECT EXPLANATION",
-      el("div", { class: "answer__direct" }, sc.direct_explanation),
-    ));
-  }
-  if (sc.relation_to_overall) {
-    inner.appendChild(renderSection("RELATION TO OVERALL",
-      el("div", { class: "answer__relation" }, sc.relation_to_overall),
-    ));
-  }
-  if (Array.isArray(sc.evidence_lines) && sc.evidence_lines.length) {
-    const list = el("ul", { class: "evidence-list" });
-    for (const ev of sc.evidence_lines) {
-      list.appendChild(el("li", null,
-        el("div", null,
-          ev.text,
-          ev.confidence && confidenceTag(ev.confidence),
-          renderRefs(ev.evidence_refs),
-        ),
-      ));
-    }
-    inner.appendChild(renderSection("EVIDENCE", list));
-  }
-  if (Array.isArray(sc.uncertainties) && sc.uncertainties.length) {
-    const ul = el("ul", { class: "uncertainty-list" });
-    for (const u of sc.uncertainties) ul.appendChild(el("li", null, u));
-    inner.appendChild(renderSection("UNCERTAINTIES", ul));
-  }
-  if (Array.isArray(sc.next_steps) && sc.next_steps.length) {
-    inner.appendChild(renderSection("NEXT STEPS", renderSuggestions(sc.next_steps)));
-  }
-  wrap.appendChild(inner);
-  return wrap;
 }
 
 function renderMarkdown(text) {
@@ -1062,24 +1012,6 @@ function scrollStageToBottom() {
   });
 }
 
-function renderSection(label, body) {
-  return el("div", { class: "answer__section" },
-    el("div", { class: "answer__label" }, label),
-    body,
-  );
-}
-
-function renderRefs(refs) {
-  if (!refs || refs.length === 0) return null;
-  const c = el("div", { class: "evidence-refs" });
-  for (const r of refs) c.appendChild(el("code", null, r));
-  return c;
-}
-
-function confidenceTag(level) {
-  return el("span", { class: `tag tag--${level}` }, level);
-}
-
 function renderSuggestions(list) {
   const wrap = el("div", { class: "suggestions" });
   for (const s of list) {
@@ -1134,166 +1066,6 @@ async function sendMessageNow(text) {
     report({ source: "ui", level: "error", message: "发送消息失败", where: "sendMessageNow", error: err });
     setState({ subStatus: "waiting_user", activeAgentActivity: null });
   }
-}
-
-// ---------- initial report ----------
-
-function renderInitialReport(msg) {
-  const c = msg.initial_report_content;
-  const wrap = el("div", { class: "bubble" });
-  const root = el("article", { class: "report" });
-
-  // 1. overview
-  root.appendChild(renderReportSection("仓库概览",
-    el("div", { class: "report__overview" },
-      el("p", null, c.overview.summary, " ", confidenceTag(c.overview.confidence)),
-    ),
-  ));
-
-  // 2. focus points
-  if (c.focus_points?.length) {
-    const grid = el("div", { class: "focus-grid" });
-    for (const fp of c.focus_points) {
-      grid.appendChild(el("div", { class: "focus-card" },
-        el("h5", null, fp.title),
-        el("p", null, fp.reason),
-        el("span", null, fp.topic),
-      ));
-    }
-    root.appendChild(renderReportSection("先抓什么", grid));
-  }
-
-  // 3. mapping
-  if (c.repo_mapping?.length) {
-    const list = el("ul", { class: "mapping-list" });
-    for (const m of c.repo_mapping) {
-      list.appendChild(el("li", { class: "mapping-row" },
-        el("div", { class: "mapping-concept" }, m.concept),
-        el("div", { class: "mapping-body" },
-          m.explanation,
-          confidenceTag(m.confidence),
-          renderRefs(m.evidence_refs),
-        ),
-      ));
-    }
-    root.appendChild(renderReportSection("当前仓库映射", list));
-  }
-
-  // 4. language and type
-  if (c.language_and_type) {
-    const lt = c.language_and_type;
-    const row = el("div", { class: "lang-row" },
-      el("span", { class: "lang-pill" }, lt.primary_language || "未知语言"),
-      el("div", { class: "lang-types" },
-        ...(lt.project_types || []).map((p) =>
-          el("span", null, `${p.type} `, confidenceTag(p.confidence)),
-        ),
-      ),
-    );
-    const sect = renderReportSection("语言与项目类型", row);
-    if (lt.degradation_notice) sect.appendChild(el("div", { class: "notice", style: { marginTop: "6px" } }, lt.degradation_notice));
-    root.appendChild(sect);
-  }
-
-  // 5. key directories
-  if (c.key_directories?.length) {
-    const list = el("ul", { class: "keydir-list" });
-    for (const kd of c.key_directories) {
-      list.appendChild(el("li", { class: "keydir-row", dataset: { role: kd.main_path_role } },
-        el("div", null,
-          el("div", { class: "keydir-path" }, kd.path),
-          el("div", { class: "keydir-role" }, kd.role),
-        ),
-        el("div", { class: "keydir-meta" },
-          el("span", null, kd.main_path_role),
-          confidenceTag(kd.confidence),
-        ),
-      ));
-    }
-    root.appendChild(renderReportSection("关键目录", list));
-  }
-
-  // 6. entry candidates
-  const ent = c.entry_section;
-  if (ent) {
-    const list = el("ul", { class: "entry-list" });
-    if (ent.entries?.length) {
-      for (const e of ent.entries) {
-        list.appendChild(el("li", { class: "entry-row", dataset: { rank: String(e.rank) } },
-          el("div", { class: "entry-target" },
-            el("small", null, `#${e.rank} ${e.target_type}`),
-            e.target_value,
-            confidenceTag(e.confidence),
-          ),
-          el("div", { class: "entry-reason" }, e.reason),
-          renderRefs(e.evidence_refs),
-        ));
-      }
-    } else {
-      list.appendChild(el("li", { class: "unknown-row" }, ent.fallback_advice || "未找到可靠入口候选"));
-    }
-    const sect = renderReportSection(`入口候选（${ent.status}）`, list);
-    root.appendChild(sect);
-  }
-
-  // 7. recommended first step
-  if (c.recommended_first_step) {
-    const fs = c.recommended_first_step;
-    root.appendChild(renderReportSection("推荐第一步",
-      el("div", { class: "first-step" },
-        el("div", { class: "first-step__target" }, fs.target),
-        el("p", { class: "first-step__reason" }, fs.reason),
-        el("p", { class: "first-step__gain" }, fs.learning_gain),
-        renderRefs(fs.evidence_refs),
-      ),
-    ));
-  }
-
-  // 8. reading path preview
-  if (c.reading_path_preview?.length) {
-    const list = el("ul", { class: "reading-list" });
-    for (const r of c.reading_path_preview) {
-      list.appendChild(el("li", { class: "reading-row" },
-        el("div", { class: "reading-step" }, String(r.step_no).padStart(2, "0")),
-        el("div", null,
-          el("div", { class: "reading-target" }, `${r.target_type} · ${r.target}`),
-          el("p", { class: "reading-reason" }, r.reason),
-          el("p", { class: "reading-gain" }, "↳ ", r.learning_gain),
-          r.skippable && el("p", { class: "reading-skip" }, "可跳过：", el("span", null, r.skippable)),
-          renderRefs(r.evidence_refs),
-        ),
-      ));
-    }
-    root.appendChild(renderReportSection("阅读路径预览", list));
-  }
-
-  // 9. unknown items
-  if (c.unknown_section?.length) {
-    const list = el("ul", { class: "unknown-list" });
-    for (const u of c.unknown_section) {
-      list.appendChild(el("li", { class: "unknown-row" },
-        el("strong", null, u.topic),
-        u.description,
-      ));
-    }
-    root.appendChild(renderReportSection("不确定项", list));
-  }
-
-  // 10. suggestions
-  if (c.suggested_next_questions?.length) {
-    root.appendChild(renderReportSection("下一步建议", renderSuggestions(c.suggested_next_questions)));
-  }
-
-  wrap.appendChild(root);
-  return wrap;
-}
-
-function renderReportSection(title, body) {
-  const sect = el("section", { class: "report__section" },
-    el("h3", { class: "report__heading" }, title),
-  );
-  sect.appendChild(body);
-  return sect;
 }
 
 // ---------- chat composer ----------

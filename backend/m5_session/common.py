@@ -21,9 +21,6 @@ def initial_progress_steps() -> list[ProgressStepStateItem]:
         for key in (
             ProgressStepKey.REPO_ACCESS,
             ProgressStepKey.FILE_TREE_SCAN,
-            ProgressStepKey.ENTRY_AND_MODULE_ANALYSIS,
-            ProgressStepKey.DEPENDENCY_ANALYSIS,
-            ProgressStepKey.SKELETON_ASSEMBLY,
             ProgressStepKey.INITIAL_REPORT_GENERATION,
         )
     ]
@@ -40,19 +37,4 @@ GOAL_KEYWORDS: tuple[tuple[LearningGoal, tuple[str, ...]], ...] = (
 )
 
 
-TOPIC_ATTRS_BY_GOAL: dict[LearningGoal, tuple[str, ...]] = {
-    LearningGoal.OVERVIEW: (
-        "structure_refs",
-        "entry_refs",
-        "flow_refs",
-        "module_refs",
-        "reading_path_refs",
-    ),
-    LearningGoal.STRUCTURE: ("structure_refs", "reading_path_refs", "module_refs"),
-    LearningGoal.ENTRY: ("entry_refs", "reading_path_refs", "module_refs"),
-    LearningGoal.FLOW: ("flow_refs", "entry_refs", "module_refs"),
-    LearningGoal.MODULE: ("module_refs", "structure_refs", "reading_path_refs"),
-    LearningGoal.DEPENDENCY: ("dependency_refs", "module_refs", "structure_refs"),
-    LearningGoal.LAYER: ("layer_refs", "module_refs", "structure_refs"),
-    LearningGoal.SUMMARY: ("unknown_refs", "reading_path_refs", "structure_refs"),
-}
+TOPIC_ATTRS_BY_GOAL: dict[LearningGoal, tuple[str, ...]] = {}

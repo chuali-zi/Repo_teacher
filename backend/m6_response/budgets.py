@@ -4,13 +4,13 @@ from backend.contracts.enums import PromptScenario
 
 OUTPUT_TOKEN_BUDGETS: dict[PromptScenario, int] = {
     PromptScenario.INITIAL_REPORT: 2400,
-    PromptScenario.FOLLOW_UP: 1400,
-    PromptScenario.GOAL_SWITCH: 1400,
-    PromptScenario.DEPTH_ADJUSTMENT: 1000,
-    PromptScenario.STAGE_SUMMARY: 1200,
+    PromptScenario.FOLLOW_UP: 2400,
+    PromptScenario.GOAL_SWITCH: 2400,
+    PromptScenario.DEPTH_ADJUSTMENT: 2400,
+    PromptScenario.STAGE_SUMMARY: 2400,
 }
 
-DEFAULT_OUTPUT_TOKEN_BUDGET = 1400
+DEFAULT_OUTPUT_TOKEN_BUDGET = 2400
 INITIAL_TOOL_CONTEXT_BUDGET_CHARS = 24_000
 FOLLOWUP_TOOL_CONTEXT_BUDGET_CHARS = 12_000
 

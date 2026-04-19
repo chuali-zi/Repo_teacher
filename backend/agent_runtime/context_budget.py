@@ -14,21 +14,18 @@ from backend.agent_tools import (
 from backend.agent_tools.analysis_tools import build_starter_excerpts_result
 from backend.agent_runtime.tool_selection import needs_source_tools, select_tools_for_turn
 from backend.contracts.domain import (
-    AnalysisBundle,
     ConversationState,
     FileTreeSnapshot,
     LlmToolContext,
     RepositoryContext,
-    TeachingSkeleton,
-    TopicRef,
 )
 from backend.contracts.enums import LearningGoal, MessageRole, PromptScenario
 from backend.m6_response.budgets import tool_context_budget_for_scenario
 
 REFERENCE_POLICY = (
     "These tool results are read-only reference material. Prefer deterministic tool evidence, "
-    "the current teaching state, and the user's question. When evidence is incomplete, mark the "
-    "answer as an inference instead of stating it as certain runtime truth."
+    "the file tree, the current teaching state, and the user's question. "
+    "When evidence is incomplete, mark the answer as an inference instead of stating it as certain runtime truth."
 )
 
 
@@ -36,10 +33,7 @@ def build_llm_tool_context(
     *,
     repository: RepositoryContext,
     file_tree: FileTreeSnapshot,
-    analysis: AnalysisBundle,
-    teaching_skeleton: TeachingSkeleton,
     conversation: ConversationState,
-    topic_slice: list[TopicRef],
     scenario: PromptScenario | None = None,
     result_cache: ToolResultCache | None = None,
 ) -> LlmToolContext:
@@ -52,14 +46,11 @@ def build_llm_tool_context(
     ctx = ToolContext(
         repository=repository,
         file_tree=file_tree,
-        analysis=analysis,
-        teaching_skeleton=teaching_skeleton,
         conversation=conversation,
     )
     seed_results = []
     for item in _seed_plan(
         conversation=conversation,
-        topic_slice=topic_slice,
         scenario=scenario,
     ):
         result = _execute_seed_item(item, ctx, result_cache=result_cache)
@@ -70,7 +61,6 @@ def build_llm_tool_context(
         build_starter_excerpts_result(
             repository,
             file_tree,
-            analysis,
             user_text=user_text,
             max_files=1,
             max_lines=40,
@@ -93,48 +83,30 @@ def build_llm_tool_context(
 def _seed_plan(
     *,
     conversation: ConversationState,
-    topic_slice: list[TopicRef],
     scenario: PromptScenario | None,
 ) -> list[SeedPlanItem]:
     goal = conversation.current_learning_goal
-    lead_topic = topic_slice[0].summary if topic_slice and topic_slice[0].summary else None
     user_text = _latest_user_text(conversation)
 
     if scenario == PromptScenario.INITIAL_REPORT:
         return [
-            SeedPlanItem("m1.get_repository_context", max_chars=2000),
+            SeedPlanItem("m1.get_repository_context", max_chars=1800),
             SeedPlanItem("m2.get_file_tree_summary", max_chars=3200),
-            SeedPlanItem("teaching.get_state_snapshot", max_chars=2500),
-            SeedPlanItem("m4.get_initial_report_skeleton", max_chars=10000),
-            SeedPlanItem("m4.get_next_questions", max_chars=1800),
+            SeedPlanItem("m2.list_relevant_files", {"limit": 60}, max_chars=5200),
+            SeedPlanItem("teaching.get_state_snapshot", max_chars=2200),
         ]
 
     items = [
         SeedPlanItem("m1.get_repository_context", max_chars=1800),
-        SeedPlanItem("m4.get_topic_slice", {"learning_goal": goal}, max_chars=3000),
-        SeedPlanItem("teaching.get_state_snapshot", max_chars=2500),
+        SeedPlanItem("teaching.get_state_snapshot", max_chars=2200),
     ]
-    if goal == LearningGoal.ENTRY or _contains_any(user_text, ("入口", "启动", "main", "app")):
-        items.append(SeedPlanItem("get_entry_candidates", {"mode": "teaching"}, max_chars=2200))
-    if goal == LearningGoal.MODULE or _contains_any(user_text, ("模块", "目录", "文件结构")):
-        items.append(SeedPlanItem("get_module_map", {"mode": "teaching"}, max_chars=2800))
-    if goal == LearningGoal.FLOW or _contains_any(user_text, ("流程", "数据流", "主流程")):
-        items.extend(
-            [
-                SeedPlanItem("get_reading_path", {"goal": goal, "mode": "teaching"}, max_chars=2500),
-                SeedPlanItem("m3.get_flow_summaries", max_chars=2500),
-            ]
-        )
-    if goal == LearningGoal.DEPENDENCY or _contains_any(user_text, ("依赖", "import", "包")):
-        items.append(SeedPlanItem("m3.get_dependency_map", max_chars=2500))
-    if goal == LearningGoal.LAYER or _contains_any(user_text, ("分层", "层")):
-        items.append(SeedPlanItem("m3.get_layer_view", max_chars=2500))
-    if goal == LearningGoal.SUMMARY:
-        items.append(SeedPlanItem("m3.get_unknowns_and_warnings", max_chars=2000))
-    if goal in {LearningGoal.DEPENDENCY, LearningGoal.LAYER, LearningGoal.FLOW}:
-        items.append(SeedPlanItem("m3.get_unknowns_and_warnings", max_chars=2000))
-    if lead_topic and _contains_any(user_text, ("证据", "为什么", "哪里看出来", "依据")):
-        items.append(SeedPlanItem("get_evidence", {"target": lead_topic}, max_chars=2200))
+    if goal in {LearningGoal.OVERVIEW, LearningGoal.STRUCTURE}:
+        items.append(SeedPlanItem("m2.get_file_tree_summary", max_chars=3200))
+        items.append(SeedPlanItem("m2.list_relevant_files", {"limit": 60}, max_chars=4200))
+    elif goal in {LearningGoal.ENTRY, LearningGoal.FLOW, LearningGoal.MODULE}:
+        items.append(SeedPlanItem("m2.list_relevant_files", {"limit": 40}, max_chars=3200))
+    elif _contains_any(user_text, ("目录", "结构", "readme", "入口", "main", "app")):
+        items.append(SeedPlanItem("m2.list_relevant_files", {"limit": 40}, max_chars=3200))
     return _dedupe_seed_items(items)
 
 

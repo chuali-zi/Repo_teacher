@@ -1,9 +1,4 @@
 import type { MessageDto, SuggestionDto } from '../types/contracts';
-import {
-  extractSuggestionHints,
-  hasRenderableMessageText,
-  stripStructuredPayload
-} from '../utils/messageText';
 import { ErrorDebugPanel } from './ErrorDebugPanel';
 import { SuggestionButtons } from './SuggestionButtons';
 
@@ -20,8 +15,8 @@ export function AgentMessage({
   onPickSuggestion,
   showSuggestions
 }: AgentMessageProps) {
-  const rawText = stripStructuredPayload(message.raw_text).trim();
-  const hasText = hasRenderableMessageText(message.raw_text);
+  const rawText = message.raw_text.trim();
+  const hasText = rawText.length > 0;
   const suggestions = getMessageSuggestions(message);
 
   return (
@@ -50,19 +45,7 @@ function getMessageKicker(message: MessageDto) {
 }
 
 function getMessageSuggestions(message: MessageDto): SuggestionDto[] {
-  if (message.suggestions.length > 0) {
-    return message.suggestions;
-  }
-
-  if (message.initial_report_content?.suggested_next_questions.length) {
-    return message.initial_report_content.suggested_next_questions;
-  }
-
-  if (message.structured_content?.next_steps.length) {
-    return message.structured_content.next_steps;
-  }
-
-  return extractSuggestionHints(message.raw_text);
+  return message.suggestions;
 }
 
 function SuggestionSection({

@@ -3,15 +3,12 @@ from __future__ import annotations
 from backend.agent_runtime.context_budget import build_llm_tool_context as build_budgeted_tool_context
 from backend.agent_tools import DEFAULT_TOOL_REGISTRY, ToolContext
 from backend.contracts.domain import (
-    AnalysisBundle,
     ConversationState,
     FileTreeSnapshot,
     LlmToolContext,
     LlmToolDefinition,
     LlmToolResult,
     RepositoryContext,
-    TeachingSkeleton,
-    TopicRef,
 )
 from backend.contracts.enums import PromptScenario
 
@@ -24,19 +21,13 @@ def build_llm_tool_context(
     *,
     repository: RepositoryContext,
     file_tree: FileTreeSnapshot,
-    analysis: AnalysisBundle,
-    teaching_skeleton: TeachingSkeleton,
     conversation: ConversationState,
-    topic_slice: list[TopicRef],
     scenario: PromptScenario | None = None,
 ) -> LlmToolContext:
     return build_budgeted_tool_context(
         repository=repository,
         file_tree=file_tree,
-        analysis=analysis,
-        teaching_skeleton=teaching_skeleton,
         conversation=conversation,
-        topic_slice=topic_slice,
         scenario=scenario,
     )
 

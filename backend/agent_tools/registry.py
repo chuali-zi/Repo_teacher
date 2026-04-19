@@ -4,7 +4,7 @@ from collections import OrderedDict
 from typing import Iterable
 
 from backend.agent_tools.analysis_tools import build_analysis_tool_specs
-from backend.agent_tools.base import ToolContext, ToolSpec
+from backend.agent_tools.base import ToolContext, ToolSpec, to_api_tool_name
 from backend.agent_tools.repository_tools import build_repository_tool_specs
 from backend.contracts.domain import LlmToolDefinition, LlmToolResult
 
@@ -18,8 +18,10 @@ class ToolRegistry:
 
     def register(self, spec: ToolSpec) -> None:
         self._tools[spec.tool_name] = spec
+        self._aliases[spec.api_tool_name()] = spec.tool_name
         for alias in spec.aliases:
             self._aliases[alias] = spec.tool_name
+            self._aliases[to_api_tool_name(alias)] = spec.tool_name
 
     def normalize_name(self, tool_name: str) -> str:
         return self._aliases.get(tool_name, tool_name)
@@ -39,6 +41,9 @@ class ToolRegistry:
 
     def openai_schemas(self) -> list[dict]:
         return [spec.openai_schema() for spec in self._tools.values()]
+
+    def api_name(self, tool_name: str) -> str:
+        return self.get(tool_name).api_tool_name()
 
     def ids(self) -> list[str]:
         return list(self._tools.keys())

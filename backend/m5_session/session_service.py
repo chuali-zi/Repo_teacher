@@ -240,6 +240,7 @@ class SessionService:
         async for event in self.analysis_workflow.run(
             session_id,
             llm_streamer=self.llm_streamer,
+            tool_streamer=self.tool_streamer,
         ):
             yield event
 

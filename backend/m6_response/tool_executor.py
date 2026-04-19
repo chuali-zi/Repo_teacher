@@ -11,12 +11,11 @@ from backend.agent_tools import (
     ToolContext,
     ToolResultCache,
     serialize_tool_result,
+    to_api_tool_name,
 )
 from backend.contracts.domain import (
-    AnalysisBundle,
     FileTreeSnapshot,
     RepositoryContext,
-    TeachingSkeleton,
 )
 
 TOOL_SCHEMAS: list[dict[str, Any]] = DEFAULT_TOOL_REGISTRY.openai_schemas()
@@ -44,8 +43,6 @@ def execute_tool_call(
     *,
     repository: RepositoryContext,
     file_tree: FileTreeSnapshot,
-    analysis: AnalysisBundle | None = None,
-    teaching_skeleton: TeachingSkeleton | None = None,
     result_cache: ToolResultCache | None = None,
 ) -> str:
     normalized = normalize_tool_name(tool_name)
@@ -57,8 +54,6 @@ def execute_tool_call(
     ctx = ToolContext(
         repository=repository,
         file_tree=file_tree,
-        analysis=analysis,
-        teaching_skeleton=teaching_skeleton,
     )
     cached = None
     cache = result_cache if result_cache is not None else GLOBAL_TOOL_RESULT_CACHE
@@ -75,3 +70,10 @@ def execute_tool_call(
 
 def normalize_tool_name(tool_name: str) -> str:
     return DEFAULT_TOOL_REGISTRY.normalize_name(tool_name)
+
+
+def api_tool_name(tool_name: str) -> str:
+    try:
+        return DEFAULT_TOOL_REGISTRY.api_name(tool_name)
+    except KeyError:
+        return to_api_tool_name(tool_name)

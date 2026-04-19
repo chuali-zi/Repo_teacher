@@ -9,8 +9,6 @@ from backend.contracts.domain import LlmToolResult
 
 
 def _scope_for_context(ctx: ToolContext) -> str:
-    if ctx.analysis is not None:
-        return ctx.analysis.bundle_id
     return ctx.file_tree.snapshot_id
 
 
