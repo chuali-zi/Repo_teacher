@@ -617,3 +617,6 @@ def test_build_messages_for_follow_up_includes_context() -> None:
    - 老师是否在每轮结尾主动给出下一步建议
    - `<json_output>` 块是否仍然能正常生成和解析
 5. **检查 response_parser 兼容性**：确认 `parse_final_answer` 仍能从新格式的 LLM 输出中正确提取 JSON
+
+
+最后完成工作后在文件开头标准，然后把文件名字改成工作日志

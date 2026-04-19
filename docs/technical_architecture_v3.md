@@ -11,7 +11,7 @@
 
 ---
 
-> v3 为 v2 的兼容修订版，保留 `ARCH-*` 章节锚点。v3 修复会误导脚手架的接口路由、版本引用和运行环境裁决，并同步 M5 教学状态追踪、M6 LLM 完整集成和 prompt 教学上下文注入等已落地实现。2026-04-15 后端进一步将 M1-M4 静态分析产物包装为 LLM 只读工具上下文，静态分析从“prompt 主边界”调整为“可引用工具结果和证据参考”。
+> v3 为 v2 的兼容修订版，保留 `ARCH-*` 章节锚点。v3 只修复会误导脚手架的接口路由、版本引用和运行环境裁决。
 
 ## 索引
 
@@ -109,10 +109,6 @@
 │  │ (入口识别 / import分析 / 模块识别 / 分层 / 流程骨架)  │   │
 │  └───────────────────────────────────────────────────┘   │
 │                                                           │
-│  ┌───────────────────────────────────────────────────┐   │
-│  │ LLM Tools: M1-M4 只读工具目录 / 工具结果 / 安全读取   │   │
-│  └───────────────────────────────────────────────────┘   │
-│                                                           │
 └───────────────────────────────────────────────────────────┘
 ```
 
@@ -123,8 +119,7 @@
 | 展示层 | M7 前端展示层 | 用户交互界面 |
 | 接口层 | FastAPI 路由 | HTTP/SSE 端点，不单独成模块，属于后端骨架 |
 | 协调层 | M5 对话管理器 | 多轮对话的状态中心，协调分析与回答 |
-| 生成层 | M6 回答生成器 | 调用 LLM，基于工具上下文、教学状态和历史摘要生成自然语言回答 |
-| 工具层 | `llm_tools` | 将 M1-M4 产物和安全文件读取能力包装为 LLM 可消费的只读工具目录/工具结果 |
+| 生成层 | M6 回答生成器 | 调用 LLM，基于教学骨架生成自然语言回答 |
 | 组装层 | M4 教学骨架组装器 | 将零散分析产物组织为教学结构 |
 | 分析层 | M3 静态分析引擎 | 核心分析能力 |
 | 基础层 | M1 仓库接入层, M2 文件树扫描与过滤 | 仓库访问基础设施 |
@@ -320,6 +315,7 @@
 
 **输出**：项目类型候选 + 置信度
 
+
 #### `reading_path_builder` — 阅读路径生成
 
 **工作方式**：
@@ -442,11 +438,10 @@ entry_detector ──→ 入口候选集合
 
 | 子模块 | 职责 |
 |--------|------|
-| `session_service` | 会话生命周期管理：创建、清理、分析编排（M1→M4 + M6 首轮报告）、多轮聊天编排（M5→M6） |
+| `session_store` | 维护当前会话状态（当前仓库、分析结果缓存、对话历史） |
+| `intent_classifier` | 识别用户消息意图：追问/目标切换/深浅调整/切换仓库/阶段性总结 |
 | `state_machine` | 管理全局状态转换（空闲态→接入中→分析中→对话态）和对话子状态 |
-| `event_streams` | 分析 SSE 和聊天 SSE 的事件迭代器，支持断线重连快照回放 |
-| `event_mapper` | 将内部 `RuntimeEvent` 映射为前端 `SseEventDto` |
-| `teaching_state` | 教学状态持续追踪：教学计划、学生学习状态、教师工作日志、教学决策 |
+| `depth_controller` | 管理深浅级别（浅/默认/深），记录切换历史 |
 
 ### 会话状态（PRD OUT-9 明确要求保持的状态）
 
@@ -463,25 +458,6 @@ entry_detector ──→ 入口候选集合
 当前深浅级别
 对话历史（用于 LLM 上下文）
 ```
-
-### 教学状态追踪（已实现）
-
-M5 在 PRD OUT-9 基础上额外维护以下教学状态，使回答更连贯、更有教学主线：
-
-| 状态对象 | 说明 |
-|---------|------|
-| `teaching_plan_state` | 教学计划表：按 `LearningGoal` 排列的步骤序列，每步含标题、关联主题、完成状态，随对话推进自动更新 |
-| `student_learning_state` | 学生学习状态：按主题记录覆盖度（未接触/初步/部分/已覆盖）、困惑信号、关注模块 |
-| `teacher_working_log` | 教师工作日志：累计已讲解项、提出建议、已确认目标切换、待补充项，最近 3 轮滚动摘要 |
-| `current_teaching_decision` | 本轮教学决策快照：由 `teaching_state` 模块在每轮开始时生成，包含推荐动作、理由、目标主题切片 |
-| `teaching_debug_events` | 教学调试事件序列（上限 80 条），记录每轮教学状态变化，仅内部使用 |
-
-这些状态仅在后端内存和 M6 prompt 中使用，不暴露在 `GET /api/session` 的外部 DTO 中。
-
-教学状态更新时机：
-- 首轮报告完成后：初始化教学计划、标记 `overview` 步骤为已完成、记录首轮覆盖的主题
-- 每轮对话开始前：根据当前教学状态生成 `TeachingDecisionSnapshot`，决定本轮教学动作
-- 每轮对话完成后：更新教学计划进度、学生覆盖度、教师日志摘要
 
 ### 意图分类
 
@@ -526,7 +502,7 @@ M5 在 PRD OUT-9 基础上额外维护以下教学状态，使回答更连贯、
 
 ### 职责
 
-基于 LLM 工具上下文、教学状态和会话历史，调用 LLM 生成符合 PRD 教学规则的自然语言回答。M1-M4 的静态分析结果不再作为唯一 prompt 边界，而是通过 `backend/llm_tools` 拆成多个只读工具结果供 LLM 参考。
+基于教学骨架和会话状态，调用 LLM 生成符合 PRD 教学规则的自然语言回答。
 
 ### 对应 PRD/交互设计
 
@@ -537,41 +513,31 @@ M5 在 PRD OUT-9 基础上额外维护以下教学状态，使回答更连贯、
 
 | 子模块 | 职责 |
 |--------|------|
-| `prompt_builder` | 根据场景构建 LLM `messages` 列表（system + history + user），注入工具上下文、教学状态和输出约束 |
-| `llm_caller` | 从 `llm_config.json` 加载配置，优先使用 `openai` SDK 流式调用，SDK 不可用时回退到 `urllib` 一次性调用 |
-| `response_parser` | 解析 LLM 返回的 `<json_output>` 或 Markdown 围栏中的 JSON，提取结构化字段；解析失败时降级生成最小合格六段式 |
-| `answer_generator` | 组合 `prompt_builder` + `llm_caller` + `response_parser` 的完整回答流程 |
+| `prompt_builder` | 根据场景（首轮报告/追问回答/目标切换/阶段性总结）构建 LLM prompt |
+| `llm_caller` | 封装 DeepSeek API 调用，支持流式输出 |
+| `response_parser` | 解析 LLM 返回，提取结构化字段（本轮重点/直接解释/与整体关系/证据/不确定项/下一步建议） |
 | `suggestion_generator` | 基于当前讲解进度和已讲内容，生成 1-3 条下一步建议 |
-| `llm_tools.context_builder` | 生成工具目录、M1-M4 工具结果、安全文件摘录、文本搜索和教学状态快照 |
 
 ### Prompt 构建策略
-
-`prompt_builder.build_messages` 负责组装 `messages` 列表，包含 system + 历史消息（最近 8 轮）+ 当前用户消息。system prompt 注入场景、深浅级别、输出约束、教学状态和 `tool_context`。`tool_context.policy` 明确说明：工具结果是只读参考，入口/流程/分层/职责等静态推断必须按候选结论处理；工具证据不足时，LLM 可以基于编程常识和仓库上下文推断，但必须标注“根据推断”“可能”或“目前不确定”。
 
 #### 首轮报告 prompt
 
 ```
 系统角色设定（教学 Agent 身份、教学规则）
-+ LLM 工具目录（`m1.*`, `m2.*`, `m3.*`, `m4.*`, `repo.*`, `teaching.*`）
-+ 工具结果（包含 `m4.get_initial_report_skeleton`、M1-M3 分析摘要、必要安全文件摘录）
++ 教学骨架全文（M4 输出的首轮教学骨架）
 + 输出格式约束（按 OUT-1 字段顺序、候选措辞、置信度标注）
 + 深浅级别（默认）
-+ JSON 输出 schema 约束（<json_output> 标签包裹）
 ```
 
 #### 多轮追问 prompt
 
 ```
 系统角色设定
-+ LLM 工具目录和工具结果
-+ `m4.get_topic_slice`（根据意图从 M4 主题索引中抽取相关部分）
-+ 其他 M1-M4 工具结果（仓库上下文、文件树、入口、依赖、模块、分层、流程、阅读路径、证据、未知项）
++ 教学骨架的主题切片（根据意图从 M4 主题索引中抽取相关部分）
 + 会话上下文（近 N 轮对话历史摘要 + 当前学习目标 + 已讲解内容列表）
-+ 教学状态上下文（教学计划进度、学生覆盖度、教师日志摘要、本轮教学决策）
 + 用户当前问题
 + 输出格式约束（OUT-11 六段式结构）
 + 深浅级别
-+ JSON 输出 schema 约束
 ```
 
 #### 阶段性总结 prompt
@@ -580,45 +546,8 @@ M5 在 PRD OUT-9 基础上额外维护以下教学状态，使回答更连贯、
 系统角色设定
 + 已讲解内容列表
 + 近 N 轮对话历史
-+ 教学状态上下文
 + 输出格式约束（总结结构：已了解/未展开/建议下一步）
 ```
-
-#### 教学上下文注入
-
-多轮场景中，`prompt_builder` 将以下教学状态序列化为自然语言并注入 system prompt：
-- `teaching_plan`：当前教学计划的步骤和完成进度
-- `student_state`：学生在各主题的覆盖度和困惑信号
-- `teacher_log`：教师最近工作摘要
-- `teacher_memory`：累计已讲解的关键结论
-- `teaching_decision`：本轮推荐的教学动作和理由
-
-### LLM 工具上下文
-
-`backend/llm_tools` 当前以“预组装工具上下文”的方式工作，不引入供应商专有 function calling 协议。M5 在首轮报告和每轮对话前调用 `build_llm_tool_context`，将可用工具目录和本轮相关工具结果写入 `PromptBuildInput.tool_context`。
-
-工具目录至少包含：
-
-| 工具名 | 来源 | 用途 |
-|--------|------|------|
-| `m1.get_repository_context` | M1 | 仓库来源、展示名、访问状态、只读策略摘要 |
-| `m2.get_file_tree_summary` | M2 | 文件树统计、主语言、规模、顶层路径、敏感文件标记 |
-| `m2.list_relevant_files` | M2 | 可读源码/说明文件列表 |
-| `m3.get_project_profile` | M3 | 项目画像和项目类型候选 |
-| `m3.get_entry_candidates` | M3 | 入口候选、理由、置信度 |
-| `m3.get_dependency_map` | M3 | import 来源分类 |
-| `m3.get_module_summaries` | M3 | 模块职责和主路径角色 |
-| `m3.get_layer_view` | M3 | 教学式分层候选 |
-| `m3.get_flow_summaries` | M3 | 候选流程骨架，不能当真实运行调用链 |
-| `m3.get_reading_path` | M3 | 阅读路径建议 |
-| `m3.get_evidence_catalog` | M3 | 证据索引 |
-| `m3.get_unknowns_and_warnings` | M3 | 未知项和警告 |
-| `m4.get_initial_report_skeleton` | M4 | 首轮报告顺序的教学骨架投影 |
-| `m4.get_topic_slice` | M4 | 本轮学习目标相关主题引用 |
-| `m4.get_next_questions` | M4 | 下一步建议问题 |
-| `repo.read_file_excerpt` | llm_tools | 安全读取非敏感文件摘录 |
-| `repo.search_text` | llm_tools | 在非敏感文本文件中搜索关键词 |
-| `teaching.get_state_snapshot` | M5 | 教学计划、学生状态、教师日志摘要 |
 
 ### 流式输出
 
@@ -626,24 +555,21 @@ M5 在 PRD OUT-9 基础上额外维护以下教学状态，使回答更连贯、
 - 后端通过 SSE 逐 chunk 推送给前端
 - 前端实时渲染，无需等待完整回答
 
-### LLM 接入实现
+### DeepSeek 接入约束
 
-- `llm_caller` 从仓库根目录 `llm_config.json` 加载配置（`api_key` 必填，`base_url`/`model`/`timeout_seconds` 可选）
-- 优先使用 `openai` SDK 的 `AsyncOpenAI` 进行流式调用（`stream=True`），逐 chunk 通过 SSE 推送给前端
-- 若 `openai` 包不可用，回退到标准库 `urllib` 对同一 OpenAI 兼容 `/chat/completions` 端点发起一次性调用，返回完整文本作为单 chunk
-- 默认 `base_url=https://api.deepseek.com`，默认 `model=deepseek-chat`
-- `api_key` 缺失或为空时，M6 调用会快速失败并返回 `llm_api_failed`
-- 模型名、`base_url`、API Key 由配置文件注入，不在业务逻辑中写死供应商参数
+- `llm_caller` 通过 OpenAI 兼容客户端接入 DeepSeek，使用 `base_url=https://api.deepseek.com`
+- 第一版默认使用 `deepseek-chat` 作为教学回答模型，优先保证响应速度和成本可控
+- 模型名、`base_url`、API Key 由配置层注入，避免在业务逻辑中写死供应商参数
 
 ### 下一步建议生成
 
-- 基于当前已讲解内容、教学计划和工具上下文中未讲解的主题
+- 基于当前已讲解内容和教学骨架中未讲解的主题
 - 排除已讲解过的内容
 - 优先推荐教学主线中的下一个自然步骤
 
 ### 依赖
 
-- 内部：M4（教学骨架）、M5（会话状态）、`llm_tools`（工具上下文）
+- 内部：M4（教学骨架）、M5（会话状态）
 - 外部：DeepSeek API（OpenAI 兼容接口）
 
 ---
@@ -769,9 +695,7 @@ FastAPI 路由层
 | M2 → M3 | 文件树 + 规模 + 主语言 |
 | M3 → M4 | 分析产物集合 |
 | M4 → M5 | 教学骨架 + 主题索引 |
-| M5 → `llm_tools` | M1-M4 产物 + 教学状态 + 本轮主题切片 |
-| `llm_tools` → M5 | LLM 工具目录 + 工具结果 |
-| M5 → M6 | `PromptBuildInput`（工具上下文 + 教学状态 + 历史摘要 + 用户问题） |
+| M5 → M6 | 教学骨架 + 会话状态 + 用户问题 |
 | M6 → DeepSeek API | LLM prompt |
 | DeepSeek API → M6 | LLM 流式响应 |
 | M6 → M5 | 结构化回答 + 下一步建议 |
@@ -781,7 +705,6 @@ FastAPI 路由层
 
 - 上层依赖下层，下层不依赖上层
 - M5 是唯一的协调者，其他模块不互相直接调用（M3 内部子模块间除外）
-- `llm_tools` 只读包装 M1-M4/M5 产物，不改写 `SessionContext`、仓库文件或分析结果
 - M3 内部子模块的依赖关系见 ARCH-05
 
 ---
@@ -828,10 +751,7 @@ FastAPI 路由层
                 ──→ SSE 推送: "正在组织教学骨架..."
                     │
                     ▼
-                [LLM Tools] 组装工具目录和工具结果
-                    │
-                    ▼
-                [M6] 首轮报告生成（基于工具上下文 + 教学状态，LLM 调用，流式输出）
+                [M6] 首轮报告生成（LLM 调用，流式输出）
                 ──→ SSE 推送: 首轮报告内容（流式）
                     │
                     ▼
@@ -859,8 +779,7 @@ FastAPI 路由层
                 │
                 ▼
         [M5] 准备 M6 输入：
-        - 从 M4 主题索引抽取相关主题切片
-        - 组装 LLM 工具目录和工具结果
+        - 从 M4 主题索引抽取相关骨架切片
         - 附加会话上下文
         - 附加深浅级别
                 │
@@ -993,8 +912,8 @@ M5 在分析过程中通过 SSE 向前端推送步骤进度：
 
 ### LLM 调用优化
 
-- 首轮报告的 prompt 使用工具上下文投影，优先注入首轮骨架工具结果和必要 M1-M3 摘要，避免把完整静态分析对象当作唯一上下文边界
-- 多轮追问时，注入本轮主题切片工具结果、相关 M1-M4 工具结果、近 N 轮摘要和当前教学状态，不依赖供应商专有 prompt caching
+- 首轮报告的 prompt 较长（含完整教学骨架），通过复用固定 system prompt 和会话内教学骨架缓存，减少重复拼装与重复输入
+- 多轮追问时，仅注入主题切片、近 N 轮摘要和当前学习目标，不依赖供应商专有 prompt caching
 - 流式输出减少用户感知延迟
 
 ### 可测试性
@@ -1074,15 +993,6 @@ M5 在分析过程中通过 SSE 向前端推送步骤进度：
 - OpenAI 兼容接口可减少 SDK 适配复杂度，便于后续切换模型或保留多供应商扩展空间
 - 供应商切换后，M1-M5 的确定性分析模块和 M7 的前端流式交互无需改动，影响面集中在 M6
 
-### ADR-08：M1-M4 静态分析工具化
-
-**决策**：保留 M1-M4 的确定性分析流水线，但在进入 M6 前通过 `backend/llm_tools` 包装为 LLM 工具目录和工具结果。
-
-**理由**：
-- 静态分析适合提供证据、候选入口、结构、依赖和阅读路径，但不应限制 LLM 对用户问题的教学解释能力。
-- 工具化后，M6 prompt 可以清楚区分“工具证据”“教学状态”“历史摘要”和“推断性解释”，降低把启发式分析误说成运行事实的风险。
-- 工具目录为后续接入真实 function calling 或前端工具调试面板预留稳定边界，同时不改变现有 HTTP/SSE 契约。
-
 ---
 
 ## 附录 A：目录结构建议
@@ -1119,19 +1029,14 @@ repo-tutor/
 │   │   ├── topic_indexer.py
 │   │   └── unknown_aggregator.py
 │   ├── m5_session/                # M5 对话管理器
-│   │   ├── session_service.py     # 会话生命周期、分析编排、聊天编排
-│   │   ├── state_machine.py       # 状态转换规则、视图映射
-│   │   ├── event_streams.py       # SSE 事件迭代器、重连快照
-│   │   ├── event_mapper.py        # RuntimeEvent → SseEventDto 映射
-│   │   └── teaching_state.py      # 教学计划/学生状态/教师日志管理
-│   ├── llm_tools/                 # LLM 只读工具上下文
-│   │   ├── __init__.py
-│   │   └── context_builder.py     # 工具目录、M1-M4 工具结果、安全文件摘录/搜索
+│   │   ├── session_store.py
+│   │   ├── intent_classifier.py
+│   │   ├── state_machine.py
+│   │   └── depth_controller.py
 │   ├── m6_response/               # M6 回答生成器
-│   │   ├── prompt_builder.py      # 消息列表组装、教学上下文注入
-│   │   ├── llm_caller.py          # llm_config.json 加载、流式/回退调用
-│   │   ├── response_parser.py     # JSON 结构化解析、降级回退
-│   │   ├── answer_generator.py    # 完整回答流程编排
+│   │   ├── prompt_builder.py
+│   │   ├── llm_caller.py
+│   │   ├── response_parser.py
 │   │   └── suggestion_generator.py
 │   ├── security/                  # 安全策略
 │   │   └── safety.py              # 敏感文件黑名单、路径越界检查
@@ -1182,7 +1087,7 @@ repo-tutor/
 |------|------|------|
 | AC-01 | M3 分析产物必须覆盖 ANALYSIS 章节的 9 项最低产出 | PRD ANALYSIS |
 | AC-02 | M3 不依赖 LLM，使用确定性分析 | ADR-03 |
-| AC-03 | M4 组装结果可按主题拆分引用，并通过 `llm_tools` 以工具结果进入 M6 prompt | PRD ANALYSIS 组织原则 5 |
+| AC-03 | M4 组装结果可按主题拆分引用，不硬编码到单一 prompt | PRD ANALYSIS 组织原则 5 |
 | AC-04 | M5 必须保持 OUT-9 列出的 9 项会话状态 | PRD OUT-9 |
 | AC-05 | M6 每轮回答包含 OUT-11 的六段结构 | PRD OUT-11 |
 | AC-06 | 所有模块不得读取敏感文件正文 | PRD INPUT 安全边界 |
@@ -1192,7 +1097,3 @@ repo-tutor/
 | AC-10 | 确定性结论必须有证据，不确定时使用候选措辞 | PRD EVIDENCE |
 | AC-11 | 流式输出：分析进度用 SSE 推送，LLM 回答用 SSE 流式 | ARCH-01 技术选型 |
 | AC-12 | 第一版单用户本地部署，不考虑多租户 | ARCH-01 |
-| AC-13 | M5 教学状态（教学计划/学生状态/教师日志）仅内部使用和注入 M6 prompt，不暴露在外部 DTO 中 | ARCH-07 |
-| AC-14 | `llm_caller` 优先使用 `openai` SDK 流式调用，SDK 不可用时回退到标准库一次性调用 | ARCH-08 |
-| AC-15 | `response_parser` 解析失败时降级生成最小合格六段式，不返回纯自由文本 | ARCH-08 |
-| AC-16 | M6 不得把 M1-M4 静态分析当成唯一边界；工具证据不足时可推断但必须标注不确定性 | ADR-08 |
