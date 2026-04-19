@@ -32,6 +32,12 @@ from backend.repo_kb.query_service import (
 _SECRET_RE = re.compile(
     r"(?:sk-[A-Za-z0-9]{16,}|gh[pousr]_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z\-_]{20,})"
 )
+_SOURCE_PATH_RE = re.compile(
+    r"(?<![\w./\\-])([A-Za-z0-9_./\\-]+\."
+    r"(?:py|js|jsx|ts|tsx|md|toml|json|yaml|yml|css|html|txt|rst))(?![\w./\\-])",
+    re.IGNORECASE,
+)
+_SYMBOL_HINT_RE = re.compile(r"(?:def|class|函数|类)\s+([A-Za-z_][A-Za-z0-9_]*)")
 _TOPIC_ATTRS_BY_GOAL: dict[LearningGoal, tuple[str, ...]] = {
     LearningGoal.OVERVIEW: (
         "structure_refs",
@@ -736,22 +742,15 @@ def build_starter_excerpts_result(
     file_tree: FileTreeSnapshot,
     analysis: AnalysisBundle,
     *,
+    user_text: str | None = None,
     max_files: int = 2,
     max_lines: int = 60,
 ) -> LlmToolResult | None:
-    paths: list[str] = []
-    for candidate in ("README.md", "README.rst", "README.txt", "readme.md"):
-        if any(
-            node.relative_path == candidate
-            and node.node_type == FileNodeType.FILE
-            and node.status == FileNodeStatus.NORMAL
-            for node in file_tree.nodes
-        ):
-            paths.append(candidate)
-            break
-    for entry in analysis.entry_candidates[:2]:
-        if entry.target_value != "unknown":
-            paths.append(entry.target_value)
+    paths: list[str] = [
+        *_paths_from_user_text(user_text or "", file_tree, analysis),
+        *_entry_candidate_paths(analysis),
+        *_readme_paths(file_tree),
+    ]
 
     excerpts: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -776,9 +775,96 @@ def build_starter_excerpts_result(
     return _tool_result(
         "read_file_excerpt",
         "agent_tools.repository_tools",
-        f"Prepared {len(excerpts)} starter excerpts from entry or README files.",
+        f"Prepared {len(excerpts)} starter excerpts from user, entry, or README hints.",
         {"files": excerpts},
     )
+
+
+def _paths_from_user_text(
+    user_text: str,
+    file_tree: FileTreeSnapshot,
+    analysis: AnalysisBundle,
+) -> list[str]:
+    paths: list[str] = []
+    readable_paths = _readable_path_set(file_tree)
+    basename_index: dict[str, list[str]] = {}
+    for path in readable_paths:
+        basename_index.setdefault(path.rsplit("/", 1)[-1].casefold(), []).append(path)
+
+    for match in _SOURCE_PATH_RE.finditer(user_text):
+        candidate = match.group(1).replace("\\", "/").strip("`'\".,:;()[]{}<>")
+        normalized = candidate.strip("/")
+        lowered = normalized.casefold()
+        if lowered in {item.casefold() for item in readable_paths}:
+            paths.append(_canonical_path(readable_paths, lowered))
+            continue
+        basename_matches = basename_index.get(normalized.rsplit("/", 1)[-1].casefold(), [])
+        if len(basename_matches) == 1:
+            paths.append(basename_matches[0])
+
+    symbols = [match.group(1).casefold() for match in _SYMBOL_HINT_RE.finditer(user_text)]
+    if symbols:
+        for evidence in analysis.evidence_catalog:
+            source_path = (evidence.source_path or "").replace("\\", "/").strip("/")
+            if not source_path or source_path.casefold() not in {item.casefold() for item in readable_paths}:
+                continue
+            haystack = " ".join(
+                item
+                for item in (
+                    evidence.source_path or "",
+                    evidence.source_location or "",
+                    evidence.content_excerpt or "",
+                )
+                if item
+            ).casefold()
+            if any(symbol in haystack for symbol in symbols):
+                paths.append(_canonical_path(readable_paths, source_path.casefold()))
+    return _dedupe_paths(paths)
+
+
+def _entry_candidate_paths(analysis: AnalysisBundle) -> list[str]:
+    paths: list[str] = []
+    for entry in analysis.entry_candidates[:2]:
+        if entry.target_value != "unknown":
+            paths.append(entry.target_value)
+    return paths
+
+
+def _readme_paths(file_tree: FileTreeSnapshot) -> list[str]:
+    for candidate in ("README.md", "README.rst", "README.txt", "readme.md"):
+        if any(
+            node.relative_path == candidate
+            and node.node_type == FileNodeType.FILE
+            and node.status == FileNodeStatus.NORMAL
+            for node in file_tree.nodes
+        ):
+            return [candidate]
+    return []
+
+
+def _readable_path_set(file_tree: FileTreeSnapshot) -> set[str]:
+    return {
+        node.relative_path.replace("\\", "/").strip("/")
+        for node in file_tree.nodes
+        if node.node_type == FileNodeType.FILE and node.status == FileNodeStatus.NORMAL
+    }
+
+
+def _canonical_path(paths: set[str], lowered_path: str) -> str:
+    return next(path for path in paths if path.casefold() == lowered_path)
+
+
+def _dedupe_paths(paths: list[str]) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for path in paths:
+        normalized = path.replace("\\", "/").strip("/")
+        key = normalized.casefold()
+        if not normalized or key in seen:
+            continue
+        deduped.append(normalized)
+        seen.add(key)
+    return deduped
 
 
 def _topic_slice_for_goal(skeleton: TeachingSkeleton, goal: LearningGoal) -> list[TopicRef]:

@@ -778,6 +778,10 @@ function renderMessage(msg) {
   } else if (msg._streaming || (!msg.streaming_complete && !msg.structured_content && !msg.initial_report_content)) {
     // streaming: just show the live text, will be replaced when message_completed arrives
     wrap.appendChild(el("pre", { class: "bubble bubble--stream", dataset: { streamId: msg.message_id } }, msg.raw_text || ""));
+  } else if (msg.initial_report_content) {
+    wrap.appendChild(renderInitialReport(msg));
+  } else if (msg.structured_content) {
+    wrap.appendChild(renderStructuredAnswer(msg));
   } else {
     wrap.appendChild(renderRawMessage(msg));
     const suggestions = collectMessageSuggestions(msg);

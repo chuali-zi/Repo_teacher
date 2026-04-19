@@ -1,190 +1,293 @@
-# Repo Tutor — Agent 快速入门
+# Repo Tutor — Agent README
 
-> 本文档面向后续 Agent（编码、审计、迭代）快速了解项目全貌。人类开发者请看 `README.md`。
+这份文档给后续 Agent、维护者和审阅者快速建立“当前代码现实”的心智模型。人类开发者如果只想知道项目是什么、怎么跑，先看 `README.md`。
 
----
+## 先记住这几件事
 
-## 一句话定义
+1. 当前主运行链路是 `backend/` + `web/`，不是 `frontend/`。
+2. `web/` 是静态阅读间前端，无构建步骤；`frontend/` 是旧版 React/Vite 原型。
+3. 产品目标来自 `docs/PRD_v5_agent.md`：只读、教学型、单 Agent、围绕入口/模块/分层/依赖/主流程/阅读路径组织教学。
+4. M1-M4 是确定性分析；M5 是唯一协调者；M6 负责 LLM 回答。
+5. 多轮聊天阶段支持工具调用；首轮报告仍由预构建工具上下文驱动。
 
-Repo Tutor 是一个 **本地单用户、只读、教学型** Web 应用。用户输入仓库路径/GitHub URL → 只读静态分析 → M1-M4 工具上下文 → LLM 生成教学报告 → 多轮对话持续深入。
+## 当前系统怎么跑
 
-## 技术栈速查
+### 首次分析链路
 
-| 后端 | Python 3.11+, FastAPI, Uvicorn, Pydantic v2, openai SDK |
-|------|---|
-| 前端 | React 18, TypeScript, Vite 5 |
-| 通信 | HTTP REST + SSE |
-| LLM | OpenAI 兼容接口（默认 DeepSeek），配置在 `llm_config.json` |
-| 存储 | 内存单会话，无数据库 |
-
-## 核心架构：7 个模块 + 工具层
-
-```
-M7 (React SPA) ──HTTP/SSE──→ FastAPI 路由层 ──→ M5 (唯一协调者)
-                                                    │
-                              ┌──────────────────────┤
-                              │                      │
-                         M1→M2→M3→M4        LLM Tools        M6 (LLM)
-                       (确定性分析链)     (只读工具上下文)  (回答生成)
+```text
+POST /api/repo
+  -> routes/repo.py
+  -> m5_session.session_service.create_repo_session()
+  -> SSE /api/analysis/stream
+  -> AnalysisWorkflow
+  -> M1 -> M2 -> M3 -> M4
+  -> TeachingService.build_initial_report_prompt_input()
+  -> M6 生成首轮报告
+  -> status = chatting / waiting_user
 ```
 
-| 模块 | 包路径 | 一句话职责 | 调 LLM |
-|------|--------|-----------|--------|
-| M1 | `backend/m1_repo_access/` | 输入校验、本地路径/GitHub clone | 否 |
-| M2 | `backend/m2_file_tree/` | 文件树扫描、忽略/敏感过滤、语言/规模判定 | 否 |
-| M3 | `backend/m3_analysis/` | 入口/import/模块/分层/流程/阅读路径 | 否 |
-| M4 | `backend/m4_skeleton/` | 教学骨架组装、主题索引 | 否 |
-| Tools | `backend/llm_tools/` | M1-M4 工具目录/工具结果、安全文件摘录、文本搜索 | 否 |
-| M5 | `backend/m5_session/` | 会话编排、状态机、教学状态、SSE 映射、工具上下文组装 | 否 |
-| M6 | `backend/m6_response/` | Prompt 构建、LLM 流式调用、结构化解析；静态分析只作参考 | **是** |
-| M7 | `frontend/src/` | 三视图 SPA、SSE 流式渲染 | 否 |
+### 多轮对话链路
 
-**调用规则**：路由 → M5 → 其他模块。M5 是唯一协调者，其他模块不互相直接调用。
+```text
+POST /api/chat
+  -> routes/chat.py
+  -> m5_session.session_service.accept_chat_message()
+  -> SSE /api/chat/stream
+  -> ChatWorkflow
+  -> TeachingService.build_prompt_input()
+  -> 如 enable_tool_calls=True，则走 agent_runtime.tool_loop
+  -> 调用 agent_tools / repo_kb / repository_tools
+  -> M6 组织回答
+  -> 更新 teaching_state / history_summary / suggestions
+```
+
+## 当前目录现实
+
+### 你最该看的目录
+
+| 路径 | 角色 |
+|------|------|
+| `backend/contracts/` | 当前后端契约源：domain、dto、enum、SSE 事件 |
+| `backend/routes/` | API 入口层 |
+| `backend/m1_repo_access/` | 仓库输入校验、GitHub clone、本地路径接入 |
+| `backend/m2_file_tree/` | 文件树、语言统计、敏感文件策略、规模判断 |
+| `backend/m3_analysis/` | 项目画像、入口、依赖、模块、分层、流程、阅读路径、repo KB |
+| `backend/m4_skeleton/` | 首轮教学骨架与 topic index |
+| `backend/m5_session/` | 会话生命周期、状态机、SSE、教学状态、工作流 |
+| `backend/m6_response/` | Prompt、LLM 调用、解析、建议生成 |
+| `backend/agent_tools/` | 工具定义、工具注册表、文件读取/搜索、分析查询工具 |
+| `backend/agent_runtime/` | 工具循环、超时、降级、上下文预算 |
+| `backend/repo_kb/` | 仓库知识库查询接口 |
+| `web/` | 当前主前端：静态页面、状态、SSE、视图、插件 |
+
+### 当前不应默认当成主链路的目录
+
+| 路径 | 说明 |
+|------|------|
+| `frontend/` | 旧版 React/Vite 原型。除非用户明确让你维护它，否则不要把它当当前前端。 |
+| `repo_tutor_tui/` | 可选 TUI。不是当前默认用户界面。 |
 
 ## 关键文件速查
 
-| 文件 | 用途 |
+| 文件 | 说明 |
 |------|------|
-| `backend/main.py` | FastAPI 应用入口，CORS 配置，路由注册 |
-| `backend/contracts/domain.py` | 所有内部数据模型（Pydantic） |
-| `backend/contracts/dto.py` | 外部 Wire DTO（API 响应/SSE 事件） |
-| `backend/contracts/enums.py` | 全量枚举值 |
-| `backend/contracts/sse.py` | SSE 事件类型定义 |
-| `backend/routes/` | HTTP 路由（repo, session, analysis, chat） |
-| `backend/m5_session/session_service.py` | 核心：会话生命周期、分析编排、聊天编排 |
-| `backend/m5_session/state_machine.py` | 状态转换规则 |
-| `backend/m5_session/teaching_state.py` | 教学计划/学生状态/教师日志管理 |
-| `backend/llm_tools/context_builder.py` | LLM 工具目录、M1-M4 工具结果、安全文件摘录和搜索 |
-| `backend/m6_response/prompt_builder.py` | LLM messages 列表组装 |
-| `backend/m6_response/llm_caller.py` | LLM 调用（openai SDK / urllib fallback） |
-| `backend/m6_response/response_parser.py` | LLM 返回的 JSON 解析 |
-| `frontend/src/App.tsx` | 前端入口，视图切换 |
-| `frontend/src/store/sessionStore.ts` | 客户端全局状态 |
-| `frontend/src/types/contracts.ts` | 前端类型契约（与后端 DTO 对齐） |
-| `llm_config.json` | LLM 运行时配置（api_key 必填） |
-| `pyproject.toml` | Python 依赖 |
-| `frontend/package.json` | Node 依赖 |
+| `backend/main.py` | FastAPI 入口，CORS 允许 `5173` 和 `5180` |
+| `backend/routes/repo.py` | 仓库接入 API |
+| `backend/routes/analysis.py` | 分析 SSE |
+| `backend/routes/chat.py` | 聊天 API + SSE |
+| `backend/routes/session.py` | 会话快照 / 清理 |
+| `backend/m5_session/session_service.py` | 全局会话服务和入口编排 |
+| `backend/m5_session/analysis_workflow.py` | 首次分析工作流 |
+| `backend/m5_session/chat_workflow.py` | 多轮对话工作流 |
+| `backend/m5_session/teaching_service.py` | 学习目标、深浅控制、PromptBuildInput 生成 |
+| `backend/m5_session/teaching_state.py` | 教学计划、学生状态、教师日志演进 |
+| `backend/llm_tools/context_builder.py` | LLM 种子工具上下文构建 |
+| `backend/agent_runtime/tool_loop.py` | 多轮工具调用循环与超时/降级控制 |
+| `backend/agent_tools/repository_tools.py` | `read_file_excerpt` / `search_text` |
+| `backend/repo_kb/query_service.py` | repo surfaces / entries / modules / evidence / reading path |
+| `backend/m6_response/llm_caller.py` | OpenAI 兼容接口调用与 `llm_config.json` 读取 |
+| `web/index.html` | 当前阅读间壳子与模板 |
+| `web/js/api.js` | HTTP + SSE 客户端 |
+| `web/js/state.js` | 前端状态仓库 |
+| `web/js/views.js` | 输入页、分析页、聊天页渲染 |
+| `web/js/plugins.js` | 插件系统与事件总线 |
 
-## API 端点
+## 当前契约和状态机
 
-| 端点 | 方法 | 返回 | 说明 |
-|------|------|------|------|
-| `/api/repo/validate` | POST | 200 | 格式校验，不碰文件系统 |
-| `/api/repo` | POST | 202 | 创建会话 + 启动分析 |
-| `/api/session` | GET | 200 | 会话快照（刷新恢复） |
-| `/api/session` | DELETE | 200 | 清理会话 |
-| `/api/analysis/stream` | GET | SSE | 分析进度 + 首轮报告 |
-| `/api/chat` | POST | 202 | 提交用户消息 |
-| `/api/chat/stream` | GET | SSE | 多轮回答流 |
+### 后端状态
 
-HTTP envelope: `{ ok: bool, session_id: string|null, data|error }`
+- `idle`
+- `accessing`
+- `analyzing`
+- `chatting`
+- `access_error`
+- `analysis_error`
 
-## 状态机
+### 聊天子状态
 
-```
-idle ──→ accessing ──→ analyzing ──→ chatting
-              │              │           │
-              ▼              ▼           ▼
-         access_error   analysis_error  idle (切仓)
-```
+- `waiting_user`
+- `agent_thinking`
+- `agent_streaming`
 
-`chatting` 子状态: `waiting_user` → `agent_thinking` → `agent_streaming` → `waiting_user`
+### 视图映射
 
-视图映射: `idle/error → input`, `accessing/analyzing → analysis`, `chatting → chat`
+- `idle / access_error / analysis_error -> input`
+- `accessing / analyzing -> analysis`
+- `chatting -> chat`
 
-## 数据流（首次分析）
+### 当前前端依赖的 SSE 事件名
 
-```
-POST /api/repo (202)
-  → M5 创建 session, status=accessing
-  → M1 校验 + clone → M2 扫描 + 过滤 → M3 静态分析 → M4 骨架组装
-  → M5 初始化教学状态
-  → M5 组装 LLM 工具上下文
-  → M6 基于工具上下文 + 教学状态生成首轮报告
-  → SSE: progress → delta → message_completed
-  → status=chatting, sub_status=waiting_user
-```
+- `status_changed`
+- `analysis_progress`
+- `degradation_notice`
+- `agent_activity`
+- `answer_stream_start`
+- `answer_stream_delta`
+- `answer_stream_end`
+- `message_completed`
+- `error`
 
-## 数据流（多轮对话）
+这些名字一旦改动，至少要同时检查：
 
-```
-POST /api/chat (202)
-  → M5 记录用户消息, sub_status=agent_thinking
-  → M5 生成教学决策 (teaching_state)
-  → M5 构建 PromptBuildInput (工具上下文 + 教学上下文 + 历史摘要)
-  → M6 LLM 流式调用 + 结构化解析
-  → SSE: delta → stream_end → message_completed
-  → M5 更新教学状态 (计划/学生/日志)
-  → sub_status=waiting_user
-```
+- `backend/contracts/dto.py`
+- `backend/contracts/sse.py`
+- `backend/m5_session/event_mapper.py`
+- `web/js/api.js`
+- `web/js/views.js`
 
-## 教学状态系统
+## 当前工具调用现实
 
-M5 维护以下教学状态（仅内部 + M6 prompt，不在外部 DTO 中暴露）：
+### 种子上下文
 
-| 对象 | 说明 |
-|------|------|
-| `TeachingPlanState` | 按 LearningGoal 排列的教学步骤，含完成状态 |
-| `StudentLearningState` | 各主题覆盖度（unseen→introduced→partially_grasped→temporarily_stable） |
-| `TeacherWorkingLog` | 当前教学目标、风险备注、最近决策、待解决问题 |
-| `TeachingDecisionSnapshot` | 每轮开始前生成：推荐动作 + 理由 + 目标切片 |
-| `TeachingDebugEvent` | 调试事件（上限 80 条） |
+首轮报告和多轮对话都会先注入 `llm_tools` 生成的种子上下文，其中包含：
 
-## 硬约束清单
+- 仓库上下文
+- 文件树摘要
+- 入口候选、模块摘要、分层、流程、阅读路径、证据、未知项
+- 教学骨架 topic slice
+- 当前教学状态快照
 
-1. **M5 唯一协调**：路由只调 M5，M5 调其他模块。
-2. **M1–M4 不调 LLM**：确定性分析，基于规则和 AST。
-3. **静态分析是工具参考**：M6 prompt 中的 M1-M4 结果来自 `llm_tools`，LLM 不应被静态分析限制；证据不足时允许推断但必须标注。
-4. **M6 不读写 SessionContext**：只消费 `PromptBuildInput`。
-5. **敏感文件只记录存在**：正文不进入分析/SSE/日志/Prompt。
-6. **安全只读**：不执行代码、不安装依赖、不修改文件。
-7. **前端服务端驱动**：视图状态来自 DTO/SSE，不本地推断。
-8. **命名源**：`backend/contracts` + `frontend/src/types/contracts.ts`。
-9. **不扩展规范**：不添加规范外的路由/消息类型/枚举值/状态转换。
+### 多轮对话中的可调用工具
 
-## 规范文档导航
+聊天阶段的工具调用由 `backend/agent_runtime/tool_loop.py` 驱动，当前主要分两类：
 
-入口：`docs/CURRENT_SPEC.md`
+- 仓库安全读取工具：`read_file_excerpt`、`search_text`
+- 分析查询工具：入口候选、repo surfaces、模块图、阅读路径、证据等
 
-| 文档 | 内容 |
-|------|------|
-| `PRD_v5_agent.md` | 产品需求：教学主线、功能列表、验收标准 |
-| `interaction_design_v1.md` | 交互设计：三视图、输入输出规格、状态转换 |
-| `technical_architecture_v3.md` | 技术架构：模块划分、运行流程、ADR |
-| `data_structure_design_v3.md` | 数据结构：实体定义、枚举、生命周期 |
-| `interface_hard_spec_v3.md` | 接口规范：HTTP/SSE 契约、Wire DTO、状态机 |
-| `spec_audit_report_v2.md` | 审计报告：已修复的契约缺口 |
+关键事实：
 
-冲突裁决：实现完成度 → `README.md`；硬约束 → `CURRENT_SPEC.md` 指向的规范。
+- 工具调用只在 follow-up / goal switch / depth adjustment 场景开启。
+- 工具调用有软超时、硬超时和降级继续回答逻辑。
+- 工具执行结果会缓存。
+- 敏感文件和不可读文件会被拒绝，返回结构化不可用结果而不是直接抛出原文。
 
-## 开发快速启动
+## 当前前端现实
+
+`web/` 不是占位目录，它就是现在跑起来的前端。
+
+它的特点：
+
+- 无框架、无打包、无 Node 运行时依赖。
+- `python -m http.server 5180` 就能启动。
+- 会话恢复依赖 `GET /api/session`。
+- 分析期和聊天期分别连接不同 SSE 流。
+- 有调试日志面板。
+- 有插件系统和三个 plugin slot：`sidebar`、`header`、`thinking`。
+
+如果你要改前端，不要先去 `frontend/src/`，先看：
+
+- `web/index.html`
+- `web/js/views.js`
+- `web/js/state.js`
+- `web/js/api.js`
+- `web/css/main.css`
+
+## 修改指引
+
+### 如果你要改 API 或 DTO
+
+优先检查：
+
+- `backend/contracts/dto.py`
+- `backend/contracts/enums.py`
+- `backend/contracts/sse.py`
+- `backend/routes/`
+- `web/js/api.js`
+- `web/js/views.js`
+- 相关测试：`backend/tests/test_routes.py`、`backend/tests/test_m5_session.py`
+
+### 如果你要改静态分析结果
+
+优先检查：
+
+- `backend/m3_analysis/`
+- `backend/m4_skeleton/`
+- `backend/repo_kb/query_service.py`
+- `backend/tests/test_m3_analysis.py`
+- `backend/tests/test_m4_skeleton.py`
+
+### 如果你要改教学策略或对话行为
+
+优先检查：
+
+- `backend/m5_session/teaching_service.py`
+- `backend/m5_session/teaching_state.py`
+- `backend/m5_session/chat_workflow.py`
+- `backend/m6_response/prompt_builder.py`
+- `backend/tests/test_m5_session.py`
+- `backend/tests/test_m6_response.py`
+
+### 如果你要改工具调用
+
+优先检查：
+
+- `backend/agent_tools/`
+- `backend/agent_runtime/tool_loop.py`
+- `backend/m6_response/tool_executor.py`
+- `backend/tests/test_tool_calling.py`
+- `backend/tests/test_llm_tools.py`
+
+### 如果你要改当前前端体验
+
+优先检查：
+
+- `web/index.html`
+- `web/js/views.js`
+- `web/js/plugins.js`
+- `web/css/main.css`
+- `web/plugins/README.md`
+
+## 运行与测试
+
+### 后端
 
 ```bash
-# 后端
-uv sync --extra dev
-uv run uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
-
-# 前端
-cd frontend && npm install && npm run dev
-
-# 测试
-pytest -q -p no:cacheprovider
-
-# 前端构建
-cd frontend && npm run build
+python -m uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-LLM 配置：编辑根目录 `llm_config.json`，`api_key` 必填。
+或：
 
-## 常见修改场景
+```bash
+scripts\dev_backend.cmd
+```
 
-| 想做什么 | 改哪里 |
-|---------|--------|
-| 新增/修改 API 路由 | `backend/routes/` + `backend/contracts/dto.py` |
-| 修改分析逻辑 | `backend/m3_analysis/` 对应子模块 |
-| 修改 LLM prompt | `backend/m6_response/prompt_builder.py` |
-| 修改教学状态逻辑 | `backend/m5_session/teaching_state.py` |
-| 修改前端渲染 | `frontend/src/views/` 或 `frontend/src/components/` |
-| 修改 SSE 事件 | `backend/m5_session/event_mapper.py` + `backend/contracts/sse.py` |
-| 新增枚举值 | `backend/contracts/enums.py` + `frontend/src/types/contracts.ts` |
-| 修改数据模型 | `backend/contracts/domain.py` |
+### 当前前端
+
+```bash
+cd web
+python -m http.server 5180 --bind 127.0.0.1
+```
+
+或：
+
+```bash
+scripts\dev_web.cmd
+scripts\dev_all.cmd
+```
+
+### 测试
+
+```bash
+pytest -q -p no:cacheprovider
+```
+
+和当前实现最相关的测试文件：
+
+- `backend/tests/test_routes.py`
+- `backend/tests/test_m5_session.py`
+- `backend/tests/test_m6_response.py`
+- `backend/tests/test_tool_calling.py`
+- `backend/tests/test_llm_tools.py`
+
+## 当前硬约束
+
+1. M1-M4 不能调用 LLM。
+2. M5 是唯一协调者，路由层不应直接编排 M1-M6 细节。
+3. M6 不应直接读写完整 `SessionContext`，只消费 `PromptBuildInput`。
+4. 敏感文件默认不读正文，不得把正文泄露到 SSE、日志或 Prompt。
+5. 如果文档和代码冲突，硬约束先看 `docs/CURRENT_SPEC.md`，当前运行现实先看本文件和 `README.md`。
+6. 除非用户明确要求，否则不要把 `frontend/` 当成当前前端来改。
+
+## 最后一个判断准则
+
+如果你只改了 `frontend/`，大概率没有改到用户现在真正看到的界面。

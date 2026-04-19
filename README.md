@@ -1,187 +1,240 @@
 # Repo Tutor
 
-面向初学者的 **只读** 源码仓库教学 Agent。输入一个本地仓库路径或公开 GitHub URL，后端完成只读仓库扫描，并把静态分析能力包装成 LLM 可消费的工具上下文，用于生成教学式阅读报告和多轮引导。
+Repo Tutor 是一个面向初学者的只读源码仓库教学 Agent。用户输入本地仓库绝对路径或 GitHub 公开仓库 URL，系统先做确定性仓库接入、文件树扫描与静态分析，再由 LLM 结合教学骨架、教学状态和安全只读工具上下文，生成首轮讲解与多轮追问回答。
 
-## 核心特性
+当前主链路是 `backend/` + `web/`：
 
-- **工具化静态分析**：M1–M4 仍基于规则和 Python `ast` 确定性运行，但结果会被拆成 `m1.*`、`m2.*`、`m3.*`、`m4.*` 多个 LLM 工具结果，而不是作为唯一 prompt 边界。
-- **LLM 驱动教学对话**：M6 通过 OpenAI 兼容接口（默认 DeepSeek）流式生成首轮教学报告和多轮追问回答，支持结构化六段式输出，并可参考安全文件摘录、搜索、教学状态等工具结果。
-- **教学状态持续追踪**：M5 维护教学计划、学生学习状态、教师工作日志，每轮对话后更新，使回答连贯且有教学主线。
-- **实时流式交互**：分析进度和 LLM 回答均通过 SSE 实时推送，前端逐字渲染。
-- **安全只读**：不执行仓库代码、不安装依赖、不修改文件、敏感文件仅记录存在不读取正文。
+- `backend/` 是 FastAPI 后端、分析流水线、会话编排和 LLM 调用中心。
+- `web/` 是正在使用的“阅读间”前端，纯静态 HTML + ES Modules，无需 Node 构建。
+- `frontend/` 仍保留旧版 React/Vite 原型，但不是当前默认前端。
+- `repo_tutor_tui/` 是可选的终端界面实验。
 
-## 技术栈
+## 这个项目在解决什么问题
 
-| 层级 | 技术 |
-|------|------|
-| 后端 | Python 3.11+, FastAPI, Uvicorn, Pydantic v2 |
-| 前端 | React 18, TypeScript, Vite 5 |
-| 通信 | HTTP REST + SSE |
-| LLM | OpenAI 兼容接口（`openai` SDK），默认 DeepSeek |
-| 静态分析 | Python 标准库 `ast` |
-| Git | `git` CLI（GitHub shallow clone） |
-| 存储 | 内存（单会话，无数据库） |
+Repo Tutor 的目标不是把仓库当成问答素材库，而是把“读懂陌生工程”这件事拆成一条教学主线：
 
-## 项目结构
+- 先帮用户建立观察框架：入口、模块、分层、依赖、主流程分别是什么。
+- 再把这些框架映射到当前仓库里：哪些目录重要、哪些文件值得先看。
+- 然后给出 3 到 6 步可执行阅读路径。
+- 在多轮对话里持续围绕当前学习目标深入，而不是每轮都从零开始。
 
-```
+这套目标来自 `docs/PRD_v5_agent.md`，也是当前实现最值得被理解的产品核心。
+
+## 当前实现的核心能力
+
+- 只读仓库接入：支持本地仓库路径和 GitHub 公开仓库 URL。
+- 安全边界：不执行目标仓库代码，不安装目标仓库依赖，不修改目标仓库文件；敏感文件默认只记录存在，不读取正文。
+- 确定性分析链：M1-M4 基于规则和 Python 语义分析，输出项目画像、入口候选、模块摘要、分层、候选流程、阅读路径、未知项和告警。
+- 教学状态编排：M5 维护学习目标、教学计划、学生覆盖度、教师工作日志和会话状态。
+- LLM 回答生成：M6 负责首轮教学报告、多轮跟进回答、目标切换确认、阶段性总结等输出。
+- 聊天阶段工具调用：后续问答支持安全工具调用，LLM 可以按需读取文件摘录、搜索文本、查询入口/模块/证据/阅读路径等结构化结果。
+- 流式体验：分析进度和回答通过 SSE 推送，`web/` 前端逐步渲染。
+- 前端插件机制：`web/plugins/` 支持在阅读间生命周期中挂接轻量插件。
+
+## 当前架构总览
+
+### 后端主线
+
+1. `POST /api/repo` 创建会话，进入 `accessing`。
+2. M1 处理路径校验或 GitHub clone。
+3. M2 扫描文件树、忽略规则、语言统计、敏感文件策略。
+4. M3 生成项目画像、入口候选、依赖分类、模块摘要、分层、候选流程、阅读路径和仓库知识库。
+5. M4 组装首轮教学骨架和 topic slice。
+6. M5 初始化教学状态，组织 SSE 事件和 Prompt 输入。
+7. M6 生成首轮教学报告，状态切到 `chatting / waiting_user`。
+8. 用户继续追问时，M5 再构建多轮 Prompt；M6 在需要时通过工具循环读取更多证据后回答。
+
+### 当前运行中的前端
+
+`web/` 是当前主前端，不走构建流程：
+
+- `web/index.html`：阅读间壳子、三种视图模板、插件挂载点。
+- `web/js/api.js`：HTTP + SSE 客户端。
+- `web/js/state.js`：轻量状态仓库。
+- `web/js/views.js`：输入页、分析页、聊天页渲染与交互。
+- `web/js/plugins.js`：插件系统和事件总线。
+- `web/plugins/`：前端插件示例与说明。
+
+## 项目目录
+
+```text
 Irene/
 ├── backend/
-│   ├── main.py                    # FastAPI 应用入口
-│   ├── contracts/                 # 共享数据模型：domain, dto, enums, sse
-│   ├── routes/                    # HTTP 路由：repo, session, analysis, chat
-│   ├── m1_repo_access/            # 输入校验、本地路径访问、GitHub 克隆
-│   ├── m2_file_tree/              # 文件树扫描、过滤、语言检测、规模判定
-│   ├── m3_analysis/               # 入口识别、import 分析、模块/分层/流程推断
-│   ├── m4_skeleton/               # 教学骨架组装、主题索引、未知项汇总
-│   ├── m5_session/                # 会话管理、状态机、SSE 事件映射、教学状态
-│   ├── m6_response/               # Prompt 构建、LLM 调用、回答解析、建议生成
-│   ├── llm_tools/                 # LLM 只读工具目录、M1-M4 工具结果、安全文件摘录/搜索
-│   ├── security/                  # 敏感文件黑名单、路径越界检查
-│   └── tests/                     # pytest 测试套件
-├── frontend/
-│   └── src/
-│       ├── views/                 # RepoInputView, AnalysisProgressView, ChatView
-│       ├── components/            # AgentMessage, ChatInput, MessageList 等
-│       ├── hooks/                 # useSession, useSSE
-│       ├── store/                 # sessionStore
-│       ├── api/                   # HTTP + SSE 客户端
-│       └── types/                 # TypeScript 类型契约
-├── docs/                          # 产品、架构、数据结构、接口规范
-├── scripts/                       # Windows 本地启动脚本
-├── llm_config.json                # LLM 运行时配置（不入版本控制为佳）
-└── pyproject.toml                 # Python 依赖与工具配置
+│   ├── main.py                  # FastAPI 入口
+│   ├── contracts/               # domain / dto / enums / sse 契约
+│   ├── routes/                  # repo / session / analysis / chat 路由
+│   ├── m1_repo_access/          # 仓库输入校验与接入
+│   ├── m2_file_tree/            # 文件树扫描与安全过滤
+│   ├── m3_analysis/             # 项目画像、入口、模块、分层、流程、阅读路径
+│   ├── m4_skeleton/             # 教学骨架组装
+│   ├── m5_session/              # 会话编排、状态机、教学状态、SSE 事件
+│   ├── m6_response/             # Prompt、LLM 调用、回答解析、建议生成
+│   ├── llm_tools/               # LLM 种子工具上下文构建
+│   ├── agent_tools/             # 可调用工具注册表与工具实现
+│   ├── agent_runtime/           # 工具循环、上下文预算、超时与降级
+│   ├── repo_kb/                 # 仓库知识库查询接口
+│   ├── security/                # 路径安全与敏感文件策略
+│   └── tests/                   # pytest 测试
+├── web/                         # 当前主前端，静态阅读间
+├── frontend/                    # 旧版 React/Vite 原型，默认不参与当前联调
+├── repo_tutor_tui/              # 可选终端界面
+├── docs/                        # PRD、架构、接口与使用文档
+├── scripts/                     # Windows 启动脚本
+├── llm_config.example.json      # LLM 配置示例
+├── llm_config.json              # 本地运行时配置
+└── pyproject.toml               # Python 项目配置
 ```
 
 ## 快速开始
 
-### 1. 配置 LLM
+### 1. 准备环境
 
-编辑根目录 `llm_config.json`：
+- Python 3.11+
+- `git` 在 PATH 中可用（如果要分析 GitHub 公开仓库）
+- 一个 OpenAI 兼容接口的模型服务
+
+### 2. 配置 LLM
+
+复制并编辑根目录 `llm_config.json`：
 
 ```json
 {
-  "api_key": "your_key_here",
+  "api_key": "your_api_key",
   "base_url": "https://api.deepseek.com",
   "model": "deepseek-chat",
   "timeout_seconds": 60
 }
 ```
 
-`api_key` 必填，其余字段可选（有默认值）。缺失或 `api_key` 为空时 M6 调用会报错。
+也可以用环境变量覆盖：
 
-### 2. 启动后端
+- `REPO_TUTOR_LLM_API_KEY`
+- `REPO_TUTOR_LLM_BASE_URL`
+- `REPO_TUTOR_LLM_MODEL`
+- `REPO_TUTOR_LLM_TIMEOUT_SECONDS`
+- `REPO_TUTOR_LLM_MAX_TOKENS`
+
+### 3. 安装后端依赖
+
+推荐使用 `uv`：
 
 ```bash
 uv sync --extra dev
-uv run uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-或使用 Windows 脚本：`scripts\dev_backend.cmd`
-
-GitHub 仓库输入需要 `git` 在 PATH 中可用。
-
-### 3. 启动前端
+如果你不用 `uv`，也可以：
 
 ```bash
-cd frontend
-npm install
-npm run dev
+python -m pip install -e ".[dev]"
 ```
 
-或使用 Windows 脚本：`scripts\dev_frontend.cmd`
-一键启动： scripts\dev_all.ps1
+### 4. 启动后端
 
-### 4. 使用
+```bash
+python -m uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
+```
 
-1. 浏览器打开 `http://127.0.0.1:5173`
-2. 输入本地仓库绝对路径或公开 GitHub URL
-3. 等待分析完成，阅读首轮教学报告
-4. 继续追问或点击建议按钮深入
+或直接运行：
+
+```bash
+scripts\dev_backend.cmd
+```
+
+### 5. 启动当前前端
+
+当前前端是 `web/`，不需要 `npm install`：
+
+```bash
+cd web
+python -m http.server 5180 --bind 127.0.0.1
+```
+
+或直接运行：
+
+```bash
+scripts\dev_web.cmd
+```
+
+一键启动前后端：
+
+```bash
+scripts\dev_all.cmd
+```
+
+### 6. 使用
+
+1. 打开 `http://127.0.0.1:5180`
+2. 输入本地仓库绝对路径，或 `https://github.com/owner/repo`
+3. 等待分析进度完成并阅读首轮报告
+4. 继续提问，例如“入口在哪里”“启动流程怎么走”“只看数据库相关部分”
 
 ## API 概览
 
-| 端点 | 方法 | 用途 |
+| 端点 | 方法 | 说明 |
 |------|------|------|
-| `/api/repo/validate` | POST | 仓库输入格式校验（不触碰文件系统） |
-| `/api/repo` | POST | 创建会话并启动分析（返回 202） |
-| `/api/session` | GET | 当前会话快照（页面刷新恢复） |
-| `/api/session` | DELETE | 清理会话并释放资源 |
-| `/api/analysis/stream` | GET | SSE 分析进度 + 首轮报告流 |
-| `/api/chat` | POST | 提交用户消息（返回 202） |
-| `/api/chat/stream` | GET | SSE 多轮回答流 |
+| `/api/repo/validate` | `POST` | 只做输入校验，不创建会话 |
+| `/api/repo` | `POST` | 创建会话并启动分析，返回 `202` |
+| `/api/session` | `GET` | 读取当前会话快照，用于刷新恢复 |
+| `/api/session` | `DELETE` | 清理当前会话 |
+| `/api/analysis/stream` | `GET` | 分析进度与首轮报告 SSE |
+| `/api/chat` | `POST` | 提交用户消息，返回 `202` |
+| `/api/chat/stream` | `GET` | 多轮回答 SSE |
 
-所有 HTTP 响应使用统一 envelope（`{ ok, session_id, data|error }`）。
+所有 HTTP 响应都使用统一 envelope：
 
-## 模块职责
+```json
+{
+  "ok": true,
+  "session_id": "sess_xxx",
+  "data": {}
+}
+```
 
-| 模块 | 职责 | LLM |
-|------|------|-----|
-| M1 仓库接入 | 输入校验、路径/URL 解析、GitHub 克隆 | 否 |
-| M2 文件树扫描 | 递归扫描、忽略/敏感过滤、语言检测、规模判定 | 否 |
-| M3 静态分析 | 入口/import/模块/分层/流程/阅读路径/证据/项目画像 | 否 |
-| M4 教学骨架 | 按 PRD 顺序组装首轮骨架、主题索引、未知项汇总 | 否 |
-| LLM 工具层 | 将 M1-M4 和安全仓库读取能力包装为只读工具目录/工具结果 | 否 |
-| M5 会话管理 | 唯一协调者，状态机、教学状态、SSE 事件映射、LLM 工具上下文组装 | 否 |
-| M6 回答生成 | Prompt 构建、LLM 流式调用、结构化回答解析；静态分析仅作为工具参考 | 是 |
-| M7 前端 | React SPA，三视图，SSE 流式渲染 | 否 |
+## 当前实现里值得注意的几点
 
-M5 是唯一协调者。路由调 M5，M5 调其他模块。M1–M4 确定性且不调 LLM；`llm_tools` 只包装只读工具上下文；M6 调 LLM，并被明确要求不要把静态分析结果当成唯一真相。
+- 当前主前端不是 `frontend/`，而是 `web/`。
+- 当前前端默认监听 `5180`，后端 CORS 同时兼容 `5173` 和 `5180`。
+- 多轮聊天已经不是“只吃初始上下文”的一锤子回答，而是带工具循环的 Agent 式回答路径。
+- `backend/m3_analysis` 不仅输出阅读报告所需材料，还会构建 `repo_kb`，供后续问答按主题检索。
+- `backend/tests/test_tool_calling.py` 说明聊天阶段工具调用已经是当前实现的一部分，而不是计划能力。
 
 ## 测试
+
+运行后端测试：
 
 ```bash
 pytest -q -p no:cacheprovider
 ```
 
-Windows 临时目录权限问题可加 `--basetemp pytest_tmp`。
-
-前端构建验证：
+Windows 临时目录有权限问题时，可追加：
 
 ```bash
-cd frontend && npm run build
+pytest -q --basetemp pytest_tmp -p no:cacheprovider
 ```
 
-## 规范文档
+如果你有意维护旧版 React 原型，再额外检查：
 
-规范入口：`docs/CURRENT_SPEC.md`。当前有效规范集：
+```bash
+cd frontend
+npm install
+npm run build
+```
 
-1. `docs/PRD_v5_agent.md` — 产品需求
-2. `docs/interaction_design_v1.md` — 交互设计
-3. `docs/technical_architecture_v3.md` — 技术架构
-4. `docs/data_structure_design_v3.md` — 数据结构
-5. `docs/interface_hard_spec_v3.md` — 接口硬规范
-6. `docs/spec_audit_report_v2.md` — 规范审计
+## 规范与说明文档
 
-文档冲突时：实现完成度以本 README 为准，硬约束以 `CURRENT_SPEC.md` 指向的规范为准。
+- 当前规范入口：`docs/CURRENT_SPEC.md`
+- 当前产品 PRD：`docs/PRD_v5_agent.md`
+- 使用说明：`docs/USAGE_GUIDE.md`
+- TUI 说明：`docs/TUI_README.md`
+- 前端插件说明：`web/plugins/README.md`
 
-## 实现状态
+文档冲突时：
 
-### 后端
+- 产品目标、接口与状态机硬约束，以 `docs/CURRENT_SPEC.md` 指向的规范为准。
+- 当前代码实际落地范围、运行方式和目录现实，以本 `README.md` 为准。
 
-- M1–M4 确定性分析流水线完整实现
-- LLM 工具层已实现：M1-M4 被拆成工具目录与工具结果，另提供安全文件摘录和文本搜索工具
-- M5 会话编排：状态机、进度快照、SSE 事件映射、教学状态（教学计划/学生状态/教师日志）
-- M6 LLM 集成：首轮报告 + 多轮对话均通过 M5→M6 路径调用 LLM，支持流式输出和结构化解析；prompt 使用工具上下文、教学状态和历史摘要
-- LLM 调用失败时返回 `llm_api_failed` / `llm_api_timeout`，不使用确定性 fallback
+## 补充说明
 
-### 前端
-
-- 三视图（输入/分析进度/聊天）完整实现
-- 首轮报告按 `initial_report_content` 区块渲染，多轮回答按 `structured_content` 六段渲染
-- SSE 流式渲染、会话恢复、建议按钮、禁用状态映射
-
-### 运行时约束
-
-- 单会话内存模型，无数据库
-- M5 是唯一协调者，其他模块不直接修改 `ConversationState`
-- 敏感文件仅记录存在，正文不进入分析/SSE/日志/Prompt
-- 所有确定性结论必须有证据，不确定时使用候选措辞
-
-## 实现规则
-
-- `backend/contracts` 和 `frontend/src/types/contracts.ts` 是命名源
-- 不添加规范外的路由名、消息类型、SSE 事件名、枚举值或状态转换
-- M1–M4 不调 LLM；`llm_tools` 不改会话/仓库；M6 不直接读写完整 `SessionContext`
-- LLM 可参考静态分析工具结果，但遇到工具证据不足时允许基于仓库上下文和编程常识推断，并必须标注不确定性
-- 前端视图状态来自服务端 DTO/SSE，不本地推断
+- `frontend/` 不是当前主前端，除非你明确要维护旧版 React 实现，否则优先看 `web/`。
+- `repo_tutor_tui/` 可以单独运行，但不是本仓库当前默认交互入口。
+- 如果你是后续维护这个仓库的 Agent，请继续看 `AGENT_README.md`。

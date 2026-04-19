@@ -9,6 +9,7 @@ from backend.agent_tools import (
     DEFAULT_TOOL_REGISTRY,
     GLOBAL_TOOL_RESULT_CACHE,
     ToolContext,
+    ToolResultCache,
     serialize_tool_result,
 )
 from backend.contracts.domain import (
@@ -45,6 +46,7 @@ def execute_tool_call(
     file_tree: FileTreeSnapshot,
     analysis: AnalysisBundle | None = None,
     teaching_skeleton: TeachingSkeleton | None = None,
+    result_cache: ToolResultCache | None = None,
 ) -> str:
     normalized = normalize_tool_name(tool_name)
     try:
@@ -59,14 +61,15 @@ def execute_tool_call(
         teaching_skeleton=teaching_skeleton,
     )
     cached = None
+    cache = result_cache if result_cache is not None else GLOBAL_TOOL_RESULT_CACHE
     if spec.deterministic:
-        cached = GLOBAL_TOOL_RESULT_CACHE.get(spec.tool_name, arguments, ctx)
+        cached = cache.get(spec.tool_name, arguments, ctx)
     if cached is not None:
         return serialize_tool_result(cached)
 
     result = DEFAULT_TOOL_REGISTRY.execute(spec.tool_name, arguments, ctx)
     if spec.deterministic:
-        GLOBAL_TOOL_RESULT_CACHE.set(spec.tool_name, arguments, ctx, result)
+        cache.set(spec.tool_name, arguments, ctx, result)
     return serialize_tool_result(result)
 
 

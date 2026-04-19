@@ -13,21 +13,13 @@ from backend.agent_runtime.tool_loop import (
     stream_answer_text_with_tools,
 )
 from backend.contracts.domain import InitialReportAnswer, PromptBuildInput, StructuredAnswer
-from backend.contracts.enums import PromptScenario
+from backend.m6_response.budgets import output_token_budget_for_scenario
 from backend.m6_response.llm_caller import stream_llm_response
 from backend.m6_response.prompt_builder import build_messages
 from backend.m6_response.response_parser import parse_final_answer
 
 LlmStreamer = Callable[..., AsyncIterator[str]]
 ToolAwareLlmStreamer = Callable[..., object]
-
-OUTPUT_TOKEN_BUDGETS: dict[PromptScenario, int] = {
-    PromptScenario.INITIAL_REPORT: 2400,
-    PromptScenario.FOLLOW_UP: 1400,
-    PromptScenario.GOAL_SWITCH: 1400,
-    PromptScenario.DEPTH_ADJUSTMENT: 1000,
-    PromptScenario.STAGE_SUMMARY: 1200,
-}
 
 
 async def stream_answer_text(
@@ -50,7 +42,7 @@ def parse_answer(
 
 
 def output_token_budget(input_data: PromptBuildInput) -> int:
-    return OUTPUT_TOKEN_BUDGETS.get(input_data.scenario, 1400)
+    return output_token_budget_for_scenario(input_data.scenario)
 
 
 def _call_with_optional_max_tokens(

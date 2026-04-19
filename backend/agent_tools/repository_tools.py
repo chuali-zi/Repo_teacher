@@ -51,7 +51,7 @@ def build_repository_tool_specs() -> list[ToolSpec]:
                 ctx.file_tree,
                 relative_path=str(arguments.get("relative_path") or ""),
                 start_line=int(arguments.get("start_line", 1) or 1),
-                max_lines=int(arguments.get("max_lines", 80) or 80),
+                max_lines=int(arguments.get("max_lines", 40) or 40),
             ),
         ),
         ToolSpec(

@@ -92,11 +92,14 @@ def _tool_context(input_data: PromptBuildInput) -> dict[str, Any]:
     if input_data.tool_context is not None:
         context = input_data.tool_context.model_dump(mode="json")
         tools = context.pop("tools", [])
+        visible_tools = tools if input_data.enable_tool_calls else []
         context["available_tool_names"] = [
-            str(item.get("tool_name") or "") for item in tools if item.get("tool_name")
+            str(item.get("tool_name") or "") for item in visible_tools if item.get("tool_name")
         ]
         context["tool_schema_transport"] = (
             "Function schemas are passed through the API tools parameter, not repeated here."
+            if input_data.enable_tool_calls
+            else "No function schemas are passed for this turn; rely on seeded tool results."
         )
         return context
     skeleton = input_data.teaching_skeleton

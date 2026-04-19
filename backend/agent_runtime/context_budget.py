@@ -8,9 +8,11 @@ from backend.agent_tools import (
     GLOBAL_TOOL_RESULT_CACHE,
     SeedPlanItem,
     ToolContext,
+    ToolResultCache,
     truncate_tool_result,
 )
 from backend.agent_tools.analysis_tools import build_starter_excerpts_result
+from backend.agent_runtime.tool_selection import needs_source_tools, select_tools_for_turn
 from backend.contracts.domain import (
     AnalysisBundle,
     ConversationState,
@@ -21,14 +23,13 @@ from backend.contracts.domain import (
     TopicRef,
 )
 from backend.contracts.enums import LearningGoal, MessageRole, PromptScenario
+from backend.m6_response.budgets import tool_context_budget_for_scenario
 
 REFERENCE_POLICY = (
     "These tool results are read-only reference material. Prefer deterministic tool evidence, "
     "the current teaching state, and the user's question. When evidence is incomplete, mark the "
     "answer as an inference instead of stating it as certain runtime truth."
 )
-INITIAL_TOOL_CONTEXT_BUDGET_CHARS = 24_000
-FOLLOWUP_TOOL_CONTEXT_BUDGET_CHARS = 12_000
 
 
 def build_llm_tool_context(
@@ -40,7 +41,14 @@ def build_llm_tool_context(
     conversation: ConversationState,
     topic_slice: list[TopicRef],
     scenario: PromptScenario | None = None,
+    result_cache: ToolResultCache | None = None,
 ) -> LlmToolContext:
+    user_text = _latest_user_text(conversation)
+    tool_selection = select_tools_for_turn(
+        scenario=scenario,
+        learning_goal=conversation.current_learning_goal,
+        user_text=user_text,
+    )
     ctx = ToolContext(
         repository=repository,
         file_tree=file_tree,
@@ -54,7 +62,7 @@ def build_llm_tool_context(
         topic_slice=topic_slice,
         scenario=scenario,
     ):
-        result = _execute_seed_item(item, ctx)
+        result = _execute_seed_item(item, ctx, result_cache=result_cache)
         clipped, _ = truncate_tool_result(result, max_chars=item.max_chars)
         seed_results.append(clipped)
 
@@ -63,24 +71,21 @@ def build_llm_tool_context(
             repository,
             file_tree,
             analysis,
+            user_text=user_text,
             max_files=1,
             max_lines=40,
         )
-        if _needs_source_excerpt(conversation)
+        if needs_source_tools(user_text)
         else None
     )
     if starter is not None:
         clipped, _ = truncate_tool_result(starter, max_chars=3000)
         seed_results.append(clipped)
 
-    total_budget = (
-        INITIAL_TOOL_CONTEXT_BUDGET_CHARS
-        if scenario == PromptScenario.INITIAL_REPORT
-        else FOLLOWUP_TOOL_CONTEXT_BUDGET_CHARS
-    )
+    total_budget = tool_context_budget_for_scenario(scenario)
     return LlmToolContext(
         policy=REFERENCE_POLICY,
-        tools=DEFAULT_TOOL_REGISTRY.definitions(),
+        tools=list(tool_selection.definitions),
         tool_results=_fit_results_to_budget(seed_results, max_chars=total_budget),
     )
 
@@ -133,16 +138,22 @@ def _seed_plan(
     return _dedupe_seed_items(items)
 
 
-def _execute_seed_item(item: SeedPlanItem, ctx: ToolContext):
+def _execute_seed_item(
+    item: SeedPlanItem,
+    ctx: ToolContext,
+    *,
+    result_cache: ToolResultCache | None = None,
+):
     spec = DEFAULT_TOOL_REGISTRY.get(item.tool_name)
+    cache = result_cache if result_cache is not None else GLOBAL_TOOL_RESULT_CACHE
     cached = None
     if spec.deterministic:
-        cached = GLOBAL_TOOL_RESULT_CACHE.get(spec.tool_name, item.arguments, ctx)
+        cached = cache.get(spec.tool_name, item.arguments, ctx)
     if cached is not None:
         return cached
     result = DEFAULT_TOOL_REGISTRY.execute(spec.tool_name, item.arguments, ctx)
     if spec.deterministic:
-        GLOBAL_TOOL_RESULT_CACHE.set(spec.tool_name, item.arguments, ctx, result)
+        cache.set(spec.tool_name, item.arguments, ctx, result)
     return result
 
 
@@ -179,25 +190,6 @@ def _latest_user_text(conversation: ConversationState) -> str:
         if message.role == MessageRole.USER:
             return message.raw_text.casefold()
     return ""
-
-
-def _needs_source_excerpt(conversation: ConversationState) -> bool:
-    text = _latest_user_text(conversation)
-    return _contains_any(
-        text,
-        (
-            "代码",
-            "源码",
-            "函数",
-            "类",
-            "实现",
-            ".py",
-            "/",
-            "\\",
-            "class ",
-            "def ",
-        ),
-    )
 
 
 def _contains_any(text: str, tokens: tuple[str, ...]) -> bool:

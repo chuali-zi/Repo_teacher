@@ -15,10 +15,11 @@ from backend.contracts.domain import (
     RepositoryContext,
     TeachingSkeleton,
 )
-from backend.contracts.enums import LearningGoal, PromptScenario
+from backend.agent_runtime.tool_selection import select_tools_for_prompt_input
 from backend.m6_response.llm_caller import StreamResult, ToolCallRequest, stream_llm_response_with_tools
+from backend.m6_response.budgets import output_token_budget_for_scenario
 from backend.m6_response.prompt_builder import build_messages
-from backend.m6_response.tool_executor import execute_tool_call, normalize_tool_name, tool_schemas_for
+from backend.m6_response.tool_executor import execute_tool_call, normalize_tool_name
 
 ToolAwareLlmStreamer = Any
 ActivityEmitter = Any
@@ -71,8 +72,8 @@ async def stream_answer_text_with_tools(
     max_tool_rounds = max(input_data.max_tool_rounds, 0)
     tool_rounds_used = 0
     round_index = 0
-    selected_tool_schemas = _select_tool_schemas(input_data)
-    max_tokens = _output_token_budget(input_data)
+    selected_tool_schemas = list(select_tools_for_prompt_input(input_data).openai_schemas)
+    max_tokens = output_token_budget_for_scenario(input_data.scenario)
 
     while True:
         queue: asyncio.Queue[ToolStreamItem | None] = asyncio.Queue()
@@ -464,41 +465,6 @@ def _normalize_tool_calls(
     return normalized
 
 
-def _select_tool_schemas(input_data: PromptBuildInput) -> list[dict[str, Any]]:
-    user_text = (input_data.user_message or "").casefold()
-    goal = input_data.conversation_state.current_learning_goal
-    names: list[str] = []
-    if goal == LearningGoal.ENTRY or _contains_any(user_text, ("入口", "启动", "main", "app")):
-        names.extend(["get_entry_candidates", "get_evidence"])
-    elif goal == LearningGoal.MODULE or _contains_any(user_text, ("模块", "目录", "文件结构")):
-        names.extend(["get_module_map", "get_evidence"])
-    elif goal == LearningGoal.FLOW or _contains_any(user_text, ("流程", "数据流", "主流程")):
-        names.extend(["get_reading_path", "m3.get_flow_summaries", "get_evidence"])
-    elif goal == LearningGoal.DEPENDENCY or _contains_any(user_text, ("依赖", "import", "包")):
-        names.extend(["m3.get_dependency_map", "get_evidence"])
-    elif goal == LearningGoal.LAYER or _contains_any(user_text, ("分层", "层")):
-        names.extend(["m3.get_layer_view", "get_module_map", "get_evidence"])
-    else:
-        names.extend(["get_evidence", "m4.get_topic_slice"])
-
-    if _needs_source_tools(user_text):
-        names.extend(["search_text", "read_file_excerpt"])
-    else:
-        names.append("search_text")
-    return tool_schemas_for(_dedupe_names(names)[:5])
-
-
-def _output_token_budget(input_data: PromptBuildInput) -> int:
-    budgets = {
-        PromptScenario.INITIAL_REPORT: 2400,
-        PromptScenario.FOLLOW_UP: 1400,
-        PromptScenario.GOAL_SWITCH: 1400,
-        PromptScenario.DEPTH_ADJUSTMENT: 1000,
-        PromptScenario.STAGE_SUMMARY: 1200,
-    }
-    return budgets.get(input_data.scenario, 1400)
-
-
 async def _call_tool_streamer(
     tool_streamer: ToolAwareLlmStreamer,
     messages: list[dict[str, Any]],
@@ -522,28 +488,6 @@ def _accepts_kwarg(func: Any, name: str) -> bool:
         parameter.kind == inspect.Parameter.VAR_KEYWORD or parameter.name == name
         for parameter in signature.parameters.values()
     )
-
-
-def _needs_source_tools(text: str) -> bool:
-    return _contains_any(
-        text,
-        ("代码", "源码", "函数", "类", "实现", ".py", "/", "\\", "class ", "def "),
-    )
-
-
-def _contains_any(text: str, tokens: tuple[str, ...]) -> bool:
-    return any(token.casefold() in text for token in tokens)
-
-
-def _dedupe_names(names: list[str]) -> list[str]:
-    deduped: list[str] = []
-    seen: set[str] = set()
-    for name in names:
-        if name in seen:
-            continue
-        deduped.append(name)
-        seen.add(name)
-    return deduped
 
 
 async def _emit_after(

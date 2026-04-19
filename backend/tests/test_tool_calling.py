@@ -144,6 +144,27 @@ class TestToolExecutor:
         assert result["available"] is True
         assert "def hello" in result["excerpt"]
 
+    def test_execute_read_file_excerpt_uses_schema_default_line_count(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        (tmp_path / "main.py").write_text(
+            "\n".join(f"print({line})" for line in range(80)),
+            encoding="utf-8",
+        )
+        repo = _repository(tmp_path)
+        file_tree = scan_repository_tree(repo)
+
+        result_json = execute_tool_call(
+            "read_file_excerpt",
+            {"relative_path": "main.py"},
+            repository=repo,
+            file_tree=file_tree,
+        )
+        result = json.loads(result_json)
+        assert result["available"] is True
+        assert result["line_count"] == 40
+
     def test_execute_read_file_excerpt_rejects_sensitive_file(self, tmp_path: Path) -> None:
         (tmp_path / ".env").write_text("SECRET=abc\n", encoding="utf-8")
         repo = _repository(tmp_path)
