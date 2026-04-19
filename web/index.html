@@ -35,14 +35,14 @@
           <div class="panel__body status-panel__body" id="status-body"></div>
         </section>
 
-        <div class="sidebar__spacer"></div>
-
         <section class="panel plugins-panel" id="plugin-slot-sidebar" data-slot="sidebar">
           <header class="panel__head">扩展</header>
           <div class="panel__body plugin-host" data-host="sidebar">
             <p class="hint">尚无插件</p>
           </div>
         </section>
+
+        <div class="sidebar__spacer"></div>
 
         <section class="panel debug-panel" id="debug-panel">
           <button class="debug-panel__toggle" id="debug-toggle" type="button">
@@ -163,5 +163,6 @@
 
     <script type="module" src="./js/main.js"></script>
     <script type="module" data-plugin="./plugins/thinking_dots.js"></script>
+    <script type="module" data-plugin="./plugins/sidecar_explainer.js"></script>
   </body>
 </html>

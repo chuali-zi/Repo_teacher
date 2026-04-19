@@ -89,6 +89,9 @@ export const api = {
   sendMessage(sessionId, message) {
     return request("POST", "/api/chat", { body: { message }, sessionId });
   },
+  explainSidecar(question) {
+    return request("POST", "/api/sidecar/explain", { body: { question } });
+  },
 };
 
 // ---- SSE ----

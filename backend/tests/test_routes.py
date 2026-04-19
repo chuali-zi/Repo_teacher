@@ -4,11 +4,14 @@ import asyncio
 import json
 from pathlib import Path
 
+import pytest
+
 from backend.m5_session import session_service
 from backend.routes.analysis import analysis_stream
 from backend.routes.chat import chat_stream
 from backend.routes.repo import submit_repo
 from backend.routes.session import get_session
+from backend.routes import sidecar as sidecar_routes
 
 
 def _fixture_repo(name: str) -> str:
@@ -96,3 +99,35 @@ def test_analysis_stream_stale_session_error_keeps_requested_session_id() -> Non
     assert '"session_id": "sess_stale"' in body
 
     session_service.clear_active_session()
+
+
+def test_sidecar_explain_returns_short_answer_without_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_explain(question: str):
+        assert question == "什么是依赖注入？"
+        return sidecar_routes.ExplainSidecarData(answer="老师这里先白话一下：它就是把依赖从外面传进来，方便替换和测试。")
+
+    monkeypatch.setattr(sidecar_routes.explainer, "explain_question", fake_explain)
+
+    response = asyncio.run(
+        sidecar_routes.explain_sidecar(type("Request", (), {"question": "什么是依赖注入？"})())
+    )
+
+    payload = _decode_json_response(response.body)
+    assert response.status_code == 200
+    assert payload == {
+        "ok": True,
+        "session_id": None,
+        "data": {
+            "answer": "老师这里先白话一下：它就是把依赖从外面传进来，方便替换和测试。"
+        },
+    }
+
+
+def test_sidecar_explain_returns_invalid_request_for_blank_question() -> None:
+    response = asyncio.run(sidecar_routes.explain_sidecar(type("Request", (), {"question": "   "})()))
+
+    payload = _decode_json_response(response.body)
+    assert response.status_code == 400
+    assert payload["ok"] is False
+    assert payload["session_id"] is None
+    assert payload["error"]["error_code"] == "invalid_request"

@@ -62,6 +62,10 @@ class SendMessageRequest(ContractModel):
     message: str
 
 
+class ExplainSidecarRequest(ContractModel):
+    question: str
+
+
 class RepositorySummaryDto(ContractModel):
     display_name: str
     source_type: RepoSourceType
@@ -296,6 +300,10 @@ class SendMessageData(ContractModel):
     sub_status: Literal["agent_thinking"]
     user_message_id: str
     chat_stream_url: str
+
+
+class ExplainSidecarData(ContractModel):
+    answer: str
 
 
 class ClearSessionData(ContractModel):

@@ -10,6 +10,7 @@ from backend.routes.analysis import router as analysis_router
 from backend.routes.chat import router as chat_router
 from backend.routes.repo import router as repo_router
 from backend.routes.session import router as session_router
+from backend.routes.sidecar import router as sidecar_router
 
 
 def create_app() -> FastAPI:
@@ -34,6 +35,7 @@ def create_app() -> FastAPI:
     app.include_router(session_router)
     app.include_router(analysis_router)
     app.include_router(chat_router)
+    app.include_router(sidecar_router)
     app.add_exception_handler(RequestValidationError, validation_exception_handler)
     return app
 

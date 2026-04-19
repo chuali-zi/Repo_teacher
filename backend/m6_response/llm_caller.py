@@ -105,6 +105,57 @@ async def stream_llm_response(
         raise last_error
 
 
+async def complete_llm_text(
+    messages: list[dict[str, str]],
+    *,
+    temperature: float = 0.6,
+    max_tokens: int | None = None,
+) -> str:
+    config = load_llm_config()
+    try:
+        from openai import APITimeoutError, AsyncOpenAI
+    except ModuleNotFoundError:
+        return await asyncio.to_thread(
+            _complete_with_stdlib_http,
+            config,
+            messages,
+            temperature,
+            max_tokens,
+        )
+
+    client = AsyncOpenAI(
+        api_key=config.api_key,
+        base_url=config.base_url,
+    )
+    last_error: Exception | None = None
+
+    for _attempt in range(MAX_RETRIES + 1):
+        try:
+            response = await client.chat.completions.create(
+                model=config.model,
+                messages=messages,
+                temperature=temperature,
+                stream=False,
+                timeout=config.timeout_seconds,
+                **_max_tokens_kwargs(config, max_tokens),
+            )
+            if not response.choices:
+                raise RuntimeError("LLM API 响应缺少 choices")
+            return _extract_message_text(response.choices[0].message.content)
+        except APITimeoutError as exc:
+            last_error = TimeoutError("LLM API 调用超时")
+            if _attempt >= MAX_RETRIES:
+                raise last_error from exc
+        except Exception as exc:
+            last_error = RuntimeError(f"LLM API 调用失败: {exc}")
+            if _attempt >= MAX_RETRIES:
+                raise last_error from exc
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("LLM API 调用失败: 无法到达此处")
+
+
 async def stream_llm_response_with_tools(
     messages: list[dict[str, Any]],
     *,
@@ -241,10 +292,7 @@ def _complete_with_stdlib_http(
         content = payload["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError) as exc:
         raise RuntimeError("LLM API 响应缺少 message.content") from exc
-    text = str(content).strip()
-    if not text:
-        raise RuntimeError("LLM API 返回了空内容")
-    return text
+    return _extract_message_text(content)
 
 
 def load_llm_config(config_path: Path = CONFIG_PATH) -> LlmConfig:
@@ -308,3 +356,25 @@ def _optional_positive_int(value: Any) -> int | None:
 def _max_tokens_kwargs(config: LlmConfig, max_tokens: int | None) -> dict[str, int]:
     effective = max_tokens if max_tokens is not None else config.max_tokens
     return {"max_tokens": effective} if effective is not None else {}
+
+
+def _extract_message_text(content: Any) -> str:
+    if isinstance(content, str):
+        text = content
+    elif isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                if item.get("type") == "text":
+                    parts.append(str(item.get("text", "")))
+                continue
+            if getattr(item, "type", None) == "text":
+                parts.append(str(getattr(item, "text", "")))
+        text = "".join(parts)
+    else:
+        text = str(content)
+
+    normalized = text.strip()
+    if not normalized:
+        raise RuntimeError("LLM API 返回了空内容")
+    return normalized
