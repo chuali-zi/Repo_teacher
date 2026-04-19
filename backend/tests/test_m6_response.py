@@ -453,7 +453,8 @@ def test_load_llm_config_uses_defaults_for_optional_fields(tmp_path: Path) -> No
 
     assert config.base_url == "https://api.deepseek.com"
     assert config.model == "deepseek-chat"
-    assert config.timeout_seconds == 60.0
+    assert config.timeout_seconds == 90.0
+    assert config.max_tokens is None
 
 
 def test_generate_next_step_suggestions_skips_explained_and_limits_to_three() -> None:

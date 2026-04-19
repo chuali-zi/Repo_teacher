@@ -718,7 +718,7 @@ class PromptBuildInput(ContractModel):
     depth_level: DepthLevel
     output_contract: OutputContract
     enable_tool_calls: bool = False
-    max_tool_rounds: int = 3
+    max_tool_rounds: int = 1
 
 
 class StructuredAnswer(ContractModel):

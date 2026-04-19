@@ -16,12 +16,9 @@ from backend.contracts.domain import (
     TopicRef,
 )
 from backend.contracts.enums import (
-    EntryRole,
     FileNodeStatus,
     FileNodeType,
     LearningGoal,
-    ReadingTargetType,
-    RepoSurface,
 )
 from backend.m3_analysis._helpers import stable_id
 from backend.repo_kb.query_service import (
@@ -738,6 +735,9 @@ def build_starter_excerpts_result(
     repository: RepositoryContext,
     file_tree: FileTreeSnapshot,
     analysis: AnalysisBundle,
+    *,
+    max_files: int = 2,
+    max_lines: int = 60,
 ) -> LlmToolResult | None:
     paths: list[str] = []
     for candidate in ("README.md", "README.rst", "README.txt", "readme.md"):
@@ -759,13 +759,15 @@ def build_starter_excerpts_result(
         normalized = path.replace("\\", "/").strip("/")
         if normalized in seen:
             continue
+        if len(excerpts) >= max_files:
+            break
         seen.add(normalized)
         result = read_file_excerpt(
             repository,
             file_tree,
             relative_path=normalized,
             start_line=1,
-            max_lines=60,
+            max_lines=max_lines,
         )
         if result.payload.get("available"):
             excerpts.append(result.payload)

@@ -21,6 +21,22 @@ from backend.contracts.domain import (
 TOOL_SCHEMAS: list[dict[str, Any]] = DEFAULT_TOOL_REGISTRY.openai_schemas()
 
 
+def tool_schemas_for(tool_names: list[str] | tuple[str, ...]) -> list[dict[str, Any]]:
+    schemas: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for tool_name in tool_names:
+        normalized = normalize_tool_name(tool_name)
+        if normalized in seen:
+            continue
+        try:
+            spec = DEFAULT_TOOL_REGISTRY.get(normalized)
+        except KeyError:
+            continue
+        schemas.append(spec.openai_schema())
+        seen.add(spec.tool_name)
+    return schemas
+
+
 def execute_tool_call(
     tool_name: str,
     arguments: dict[str, Any],

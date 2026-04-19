@@ -25,6 +25,7 @@ from backend.contracts.enums import (
 from backend.m5_session.session_service import SessionService
 from backend.m6_response.llm_caller import StreamResult, ToolCallRequest
 from backend.m5_session import session_service
+from backend.m5_session.chat_workflow import ChatTurnTimeouts
 from backend.m5_session.event_mapper import runtime_event_to_sse
 from backend.m5_session.event_streams import iter_analysis_events, iter_chat_events
 
@@ -381,8 +382,10 @@ def test_chat_stream_completes_followup_answer(tmp_path: Path, fake_llm_streamer
     assert "teaching_skeleton" not in prompt_payload
     tool_names = {result["tool_name"] for result in prompt_payload["tool_context"]["tool_results"]}
     assert "m4.get_topic_slice" in tool_names
-    assert {"get_entry_candidates", "repo.get_entry_candidates"} & tool_names
-    assert "read_file_excerpt" in tool_names
+    assert "m1.get_repository_context" in tool_names
+    assert "teaching.get_state_snapshot" in tool_names
+    assert not {"get_entry_candidates", "repo.get_entry_candidates"} & tool_names
+    assert "read_file_excerpt" not in tool_names
     assert "teaching.get_state_snapshot" in tool_names
     assert prompt_payload["teaching_plan"]["steps"]
     assert prompt_payload["student_learning_state"]["topics"]
@@ -686,6 +689,40 @@ def test_chat_stream_reports_llm_failure_without_fallback_answer(tmp_path: Path)
     assert snapshot.sub_status == ConversationSubStatus.WAITING_USER
     assert snapshot.active_error.error_code == ErrorCode.LLM_API_FAILED
     assert snapshot.messages[-1].role == MessageRole.USER
+
+    session_service.clear_active_session()
+
+
+def test_chat_turn_timeout_reports_llm_timeout(tmp_path: Path) -> None:
+    (tmp_path / "README.md").write_text("# demo\n", encoding="utf-8")
+    (tmp_path / "app.py").write_text("print('hi')\n", encoding="utf-8")
+
+    session_service.create_repo_session(str(tmp_path))
+    session_id = session_service.store.active_session.session_id
+    asyncio.run(_collect(iter_analysis_events(session_id)))
+
+    async def slow_tool_streamer(
+        messages, *, tools=None, on_content_delta=None, temperature=0.6
+    ):
+        await asyncio.sleep(3600)
+        return StreamResult(content_chunks=[], finish_reason="stop")
+
+    previous_tool_streamer = session_service.tool_streamer
+    previous_timeouts = session_service.chat_workflow.timeouts
+    try:
+        session_service.tool_streamer = slow_tool_streamer
+        session_service.chat_workflow.timeouts = ChatTurnTimeouts(total_seconds=0.01)
+        session_service.accept_chat_message(session_id, "这轮应该被总超时中断")
+        events = asyncio.run(_collect(iter_chat_events(session_id)))
+    finally:
+        session_service.tool_streamer = previous_tool_streamer
+        session_service.chat_workflow.timeouts = previous_timeouts
+
+    assert events[-1].event_type == RuntimeEventType.ERROR
+    assert events[-1].error.error_code == ErrorCode.LLM_API_TIMEOUT
+    snapshot = session_service.get_snapshot(session_id)
+    assert snapshot.sub_status == ConversationSubStatus.WAITING_USER
+    assert snapshot.active_error.error_code == ErrorCode.LLM_API_TIMEOUT
 
     session_service.clear_active_session()
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -22,7 +23,7 @@ from backend.contracts.enums import (
 from backend.m2_file_tree.tree_scanner import scan_repository_tree
 from backend.m3_analysis import run_static_analysis
 from backend.m4_skeleton import assemble_teaching_skeleton
-from backend.m6_response import answer_generator
+from backend.agent_tools import repository_tools
 from backend.agent_runtime import tool_loop
 from backend.m6_response.answer_generator import (
     ToolLoopTimeouts,
@@ -78,7 +79,6 @@ def _prompt_input(skeleton, conversation, *, enable_tools: bool = True) -> Promp
         depth_level=DepthLevel.DEFAULT,
         output_contract=_output_contract(),
         enable_tool_calls=enable_tools,
-        max_tool_rounds=3,
     )
 
 
@@ -174,6 +174,32 @@ class TestToolExecutor:
         result = json.loads(result_json)
         assert len(result["matches"]) >= 1
         assert any("Flask" in m["line"] for m in result["matches"])
+
+    def test_execute_search_text_degrades_on_rg_timeout(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        (tmp_path / "app.py").write_text("needle = True\n", encoding="utf-8")
+        repo = _repository(tmp_path)
+        file_tree = scan_repository_tree(repo)
+
+        monkeypatch.setattr(repository_tools.shutil, "which", lambda _: "rg")
+
+        def timeout_run(*args, **kwargs):
+            raise subprocess.TimeoutExpired(args[0], kwargs.get("timeout"))
+
+        monkeypatch.setattr(repository_tools.subprocess, "run", timeout_run)
+        result_json = execute_tool_call(
+            "search_text",
+            {"query": "needle"},
+            repository=repo,
+            file_tree=file_tree,
+        )
+
+        result = json.loads(result_json)
+        assert result["degraded"] is True
+        assert result["reason"] == "search_timeout"
 
     def test_execute_unknown_tool_returns_error(self, tmp_path: Path) -> None:
         repo = _repository(tmp_path)
@@ -395,7 +421,7 @@ class TestStreamAnswerWithTools:
             return text, items
 
         text, items = asyncio.run(collect())
-        assert call_count == 4  # initial + 2 tool rounds + final no-tool completion
+        assert call_count == 3  # 2 tool batches + final no-tool completion
         assert "直接完成" in text
         assert any(
             isinstance(item, ToolStreamActivity) and item.payload["phase"] == "degraded_continue"
@@ -413,6 +439,7 @@ class TestStreamAnswerWithTools:
         skeleton = assemble_teaching_skeleton(analysis)
         conversation = ConversationState(current_repo_id=repo.repo_id)
         prompt_input = _prompt_input(skeleton, conversation)
+        prompt_input = prompt_input.model_copy(update={"max_tool_rounds": 2})
 
         call_count = 0
 
@@ -473,6 +500,7 @@ class TestStreamAnswerWithTools:
         skeleton = assemble_teaching_skeleton(analysis)
         conversation = ConversationState(current_repo_id=repo.repo_id)
         prompt_input = _prompt_input(skeleton, conversation)
+        prompt_input = prompt_input.model_copy(update={"max_tool_rounds": 2})
         activities: list[dict[str, object]] = []
         call_count = 0
 

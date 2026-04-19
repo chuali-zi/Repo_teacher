@@ -90,7 +90,15 @@ def _build_payload(input_data: PromptBuildInput) -> dict[str, Any]:
 
 def _tool_context(input_data: PromptBuildInput) -> dict[str, Any]:
     if input_data.tool_context is not None:
-        return input_data.tool_context.model_dump(mode="json")
+        context = input_data.tool_context.model_dump(mode="json")
+        tools = context.pop("tools", [])
+        context["available_tool_names"] = [
+            str(item.get("tool_name") or "") for item in tools if item.get("tool_name")
+        ]
+        context["tool_schema_transport"] = (
+            "Function schemas are passed through the API tools parameter, not repeated here."
+        )
+        return context
     skeleton = input_data.teaching_skeleton
     return {
         "policy": "兼容模式：未传入正式工具上下文，以下仅提供最小教学骨架投影。",

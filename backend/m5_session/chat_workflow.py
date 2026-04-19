@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 
-from backend.contracts.domain import MessageRecord, RuntimeEvent, SessionContext, StructuredAnswer
+from backend.contracts.domain import MessageRecord, RuntimeEvent, StructuredAnswer
 from backend.contracts.enums import (
     ConversationSubStatus,
     MessageRole,
@@ -21,12 +23,21 @@ from backend.m6_response.answer_generator import (
     stream_answer_text_with_tools,
 )
 
+ENV_CHAT_TURN_TIMEOUT_SECONDS = "REPO_TUTOR_CHAT_TURN_TIMEOUT_SECONDS"
+DEFAULT_CHAT_TURN_TIMEOUT_SECONDS = 240.0
+
+
+@dataclass(frozen=True)
+class ChatTurnTimeouts:
+    total_seconds: float = DEFAULT_CHAT_TURN_TIMEOUT_SECONDS
+
 
 class ChatWorkflow:
-    def __init__(self, *, repository, events, teaching) -> None:
+    def __init__(self, *, repository, events, teaching, timeouts: ChatTurnTimeouts | None = None) -> None:
         self.repository = repository
         self.events = events
         self.teaching = teaching
+        self.timeouts = timeouts or load_chat_turn_timeouts()
 
     async def run(
         self,
@@ -84,8 +95,10 @@ class ChatWorkflow:
         answer_stream_ended = False
         json_marker = "<json_output>"
         marker_tail_size = len(json_marker) - 1
+        timeout_scope = None
         try:
-            async with asyncio.timeout(45):
+            timeout_scope = asyncio.timeout(self.timeouts.total_seconds)
+            async with timeout_scope:
                 async for item in answer_stream:
                     if isinstance(item, ToolStreamActivity):
                         event = (
@@ -128,6 +141,15 @@ class ChatWorkflow:
         except asyncio.CancelledError as exc:
             self.events.cancel_chat_turn(session, exc)
             raise
+        except TimeoutError as exc:
+            error = (
+                TimeoutError(f"Chat turn exceeded {self.timeouts.total_seconds:.1f} seconds")
+                if timeout_scope is not None and timeout_scope.expired()
+                else exc
+            )
+            for event in self.events.fail_chat_turn(session, error):
+                yield event
+            return
         except Exception as exc:
             for event in self.events.fail_chat_turn(session, exc):
                 yield event
@@ -206,3 +228,16 @@ class ChatWorkflow:
             message_id=message.message_id,
             payload={"message": message.model_dump(mode="python")},
         )
+
+
+def load_chat_turn_timeouts() -> ChatTurnTimeouts:
+    raw = os.getenv(ENV_CHAT_TURN_TIMEOUT_SECONDS)
+    if not raw:
+        return ChatTurnTimeouts()
+    try:
+        total_seconds = float(raw)
+    except ValueError:
+        return ChatTurnTimeouts()
+    if total_seconds <= 0:
+        return ChatTurnTimeouts()
+    return ChatTurnTimeouts(total_seconds=total_seconds)

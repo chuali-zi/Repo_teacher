@@ -4,10 +4,12 @@ import json
 import re
 import shutil
 import subprocess
+from itertools import islice
 from pathlib import Path
+from time import monotonic
 from typing import Any
 
-from backend.agent_tools.base import ToolContext, ToolSpec
+from backend.agent_tools.base import ToolSpec
 from backend.contracts.domain import FileNode, FileTreeSnapshot, LlmToolResult, RepositoryContext
 from backend.contracts.enums import FileNodeStatus, FileNodeType
 from backend.m3_analysis._helpers import stable_id
@@ -17,6 +19,8 @@ _SECRET_RE = re.compile(
     r"(?:sk-[A-Za-z0-9]{16,}|gh[pousr]_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z\-_]{20,})"
 )
 _MAX_EXCERPT_BYTES = 240_000
+_SEARCH_TIMEOUT_SECONDS = 3.0
+_RG_BATCH_SIZE = 80
 
 
 def build_repository_tool_specs() -> list[ToolSpec]:
@@ -30,7 +34,7 @@ def build_repository_tool_specs() -> list[ToolSpec]:
                 "properties": {
                     "relative_path": {"type": "string"},
                     "start_line": {"type": "integer", "default": 1},
-                    "max_lines": {"type": "integer", "default": 80},
+                    "max_lines": {"type": "integer", "default": 40},
                 },
                 "required": ["relative_path"],
             },
@@ -85,7 +89,7 @@ def read_file_excerpt(
     *,
     relative_path: str,
     start_line: int = 1,
-    max_lines: int = 80,
+    max_lines: int = 40,
 ) -> LlmToolResult:
     normalized = _normalize_relative_path(relative_path)
     node = _find_readable_file_node(file_tree, normalized)
@@ -169,25 +173,34 @@ def search_text(
         for node in _readable_text_nodes(file_tree)
         if not node.size_bytes or node.size_bytes <= _MAX_EXCERPT_BYTES
     }
-    matches = _search_with_ripgrep(
+    matches, timed_out = _search_with_ripgrep(
         repo_root=repo_root,
         query=stripped_query,
         readable_nodes=readable_nodes,
         limit=limit,
     )
-    if matches is None:
-        matches = _search_with_python(
+    if matches is None and not timed_out:
+        matches, timed_out = _search_with_python(
             repo_root=repo_root,
             query=stripped_query,
             readable_nodes=readable_nodes,
             limit=limit,
         )
 
+    payload: dict[str, Any] = {"query": stripped_query, "matches": matches or []}
+    if timed_out:
+        payload.update(
+            {
+                "degraded": True,
+                "reason": "search_timeout",
+                "timeout_seconds": _SEARCH_TIMEOUT_SECONDS,
+            }
+        )
     return _tool_result(
         "search_text",
         "agent_tools.repository_tools",
-        f"Found {len(matches)} matches for {stripped_query!r}.",
-        {"query": stripped_query, "matches": matches},
+        f"Found {len(matches or [])} matches for {stripped_query!r}.",
+        payload,
     )
 
 
@@ -197,50 +210,58 @@ def _search_with_ripgrep(
     query: str,
     readable_nodes: dict[str, FileNode],
     limit: int,
-) -> list[dict[str, Any]] | None:
+) -> tuple[list[dict[str, Any]] | None, bool]:
     rg_path = shutil.which("rg")
     if not rg_path:
-        return None
-
-    try:
-        completed = subprocess.run(
-            [rg_path, "--json", "-n", "--no-messages", "-F", "-i", query, "."],
-            cwd=repo_root,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
-        )
-    except OSError:
-        return None
-
-    if completed.returncode not in {0, 1}:
-        return None
+        return None, False
 
     matches: list[dict[str, Any]] = []
-    for line in completed.stdout.splitlines():
+    deadline = monotonic() + _SEARCH_TIMEOUT_SECONDS
+    for batch in _batched(readable_nodes.keys(), _RG_BATCH_SIZE):
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            return matches, True
         try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if payload.get("type") != "match":
-            continue
-        data = payload.get("data") or {}
-        relative_path = _normalize_relative_path(str(data.get("path", {}).get("text") or ""))
-        node = readable_nodes.get(relative_path)
-        if node is None:
-            continue
-        matches.append(
-            {
-                "relative_path": relative_path,
-                "line_no": int(data.get("line_number") or 1),
-                "line": _redact(str(data.get("lines", {}).get("text") or "").strip())[:260],
-            }
-        )
-        if len(matches) >= limit:
-            break
-    return matches
+            completed = subprocess.run(
+                [rg_path, "--json", "-n", "--no-messages", "-F", "-i", query, *batch],
+                cwd=repo_root,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+                timeout=remaining,
+            )
+        except subprocess.TimeoutExpired:
+            return matches, True
+        except OSError:
+            return None, False
+
+        if completed.returncode not in {0, 1}:
+            return None, False
+
+        for line in completed.stdout.splitlines():
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if payload.get("type") != "match":
+                continue
+            data = payload.get("data") or {}
+            relative_path = _normalize_relative_path(str(data.get("path", {}).get("text") or ""))
+            node = readable_nodes.get(relative_path)
+            if node is None:
+                continue
+            matches.append(
+                {
+                    "relative_path": relative_path,
+                    "line_no": int(data.get("line_number") or 1),
+                    "line": _redact(str(data.get("lines", {}).get("text") or "").strip())[:260],
+                }
+            )
+            if len(matches) >= limit:
+                return matches, False
+    return matches, False
 
 
 def _search_with_python(
@@ -249,10 +270,13 @@ def _search_with_python(
     query: str,
     readable_nodes: dict[str, FileNode],
     limit: int,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], bool]:
     lowered_query = query.casefold()
     matches: list[dict[str, Any]] = []
+    deadline = monotonic() + _SEARCH_TIMEOUT_SECONDS
     for relative_path, node in readable_nodes.items():
+        if monotonic() >= deadline:
+            return matches, True
         if len(matches) >= limit:
             break
         file_path = resolve_repo_relative_path(repo_root, relative_path)
@@ -271,7 +295,13 @@ def _search_with_python(
             )
             if len(matches) >= limit:
                 break
-    return matches
+    return matches, False
+
+
+def _batched(items, size: int):
+    iterator = iter(items)
+    while batch := list(islice(iterator, size)):
+        yield batch
 
 
 def _tool_result(

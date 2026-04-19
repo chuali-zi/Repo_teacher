@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -14,9 +15,10 @@ from backend.contracts.domain import (
     RepositoryContext,
     TeachingSkeleton,
 )
+from backend.contracts.enums import LearningGoal, PromptScenario
 from backend.m6_response.llm_caller import StreamResult, ToolCallRequest, stream_llm_response_with_tools
 from backend.m6_response.prompt_builder import build_messages
-from backend.m6_response.tool_executor import TOOL_SCHEMAS, execute_tool_call, normalize_tool_name
+from backend.m6_response.tool_executor import execute_tool_call, normalize_tool_name, tool_schemas_for
 
 ToolAwareLlmStreamer = Any
 ActivityEmitter = Any
@@ -66,13 +68,19 @@ async def stream_answer_text_with_tools(
     timeouts: ToolLoopTimeouts = DEFAULT_TOOL_LOOP_TIMEOUTS,
 ) -> AsyncIterator[ToolStreamItem]:
     messages: list[dict[str, Any]] = build_messages(input_data)
-    max_rounds = input_data.max_tool_rounds
+    max_tool_rounds = max(input_data.max_tool_rounds, 0)
+    tool_rounds_used = 0
+    round_index = 0
+    selected_tool_schemas = _select_tool_schemas(input_data)
+    max_tokens = _output_token_budget(input_data)
 
-    for round_index in range(max_rounds + 1):
+    while True:
         queue: asyncio.Queue[ToolStreamItem | None] = asyncio.Queue()
         round_started_at = monotonic()
         saw_visible_content = False
         emitted_text_chunks: list[str] = []
+        allow_tools = tool_rounds_used < max_tool_rounds
+        active_tool_schemas = selected_tool_schemas if allow_tools else []
 
         async def _emit_activity(
             phase: str,
@@ -113,10 +121,12 @@ async def stream_answer_text_with_tools(
 
         async def _runner() -> StreamResult:
             try:
-                return await tool_streamer(
+                return await _call_tool_streamer(
+                    tool_streamer,
                     messages,
-                    tools=TOOL_SCHEMAS,
+                    tools=active_tool_schemas,
                     on_content_delta=_on_delta,
+                    max_tokens=max_tokens,
                 )
             finally:
                 await queue.put(None)
@@ -150,6 +160,16 @@ async def stream_answer_text_with_tools(
                 yield ToolStreamTextDelta(chunk)
 
         if not result.tool_calls:
+            return
+
+        if not allow_tools:
+            yield await _make_activity_item(
+                on_activity,
+                round_started_at,
+                round_index,
+                "degraded_continue",
+                "模型在最终轮仍请求工具，已忽略并结束本轮工具循环",
+            )
             return
 
         tool_calls = _normalize_tool_calls(result.tool_calls, round_index)
@@ -232,38 +252,40 @@ async def stream_answer_text_with_tools(
                     tool_arguments=arguments,
                 )
 
-        if round_index < max_rounds:
+        tool_rounds_used += 1
+        if tool_rounds_used >= max_tool_rounds:
+            messages.append(
+                {
+                    "role": "system",
+                    "content": "工具调用轮次已达上限。接下来直接完成回答，不要再调用工具。",
+                }
+            )
             yield await _make_activity_item(
                 on_activity,
                 round_started_at,
                 round_index,
-                "waiting_llm_after_tool",
-                "已拿到工具结果，正在组织回答",
+                "degraded_continue",
+                "已达到工具轮次上限，直接完成回答",
             )
-            continue
+            async for item in _stream_final_answer_without_tools(
+                messages,
+                tool_streamer=tool_streamer,
+                on_activity=on_activity,
+                round_index=round_index + 1,
+                max_tokens=max_tokens,
+            ):
+                yield item
+            return
 
-        messages.append(
-            {
-                "role": "system",
-                "content": "工具调用轮次已达上限。接下来直接完成回答，不要再调用工具。",
-            }
-        )
         yield await _make_activity_item(
             on_activity,
             round_started_at,
             round_index,
-            "degraded_continue",
-            "已达到工具轮次上限，直接完成回答",
+            "waiting_llm_after_tool",
+            "已拿到工具结果，正在组织回答",
         )
-        async for item in _stream_final_answer_without_tools(
-            messages,
-            tool_streamer=tool_streamer,
-            on_activity=on_activity,
-            round_index=round_index + 1,
-        ):
-            yield item
-        return
-
+        round_index += 1
+        continue
 
 async def _execute_tool_batch(
     tool_calls: list[ToolCallRequest],
@@ -353,6 +375,7 @@ async def _stream_final_answer_without_tools(
     tool_streamer: ToolAwareLlmStreamer,
     on_activity: ActivityEmitter | None,
     round_index: int,
+    max_tokens: int,
 ) -> AsyncIterator[ToolStreamItem]:
     queue: asyncio.Queue[ToolStreamItem | None] = asyncio.Queue()
     round_started_at = monotonic()
@@ -364,10 +387,12 @@ async def _stream_final_answer_without_tools(
 
     async def _runner() -> StreamResult:
         try:
-            return await tool_streamer(
+            return await _call_tool_streamer(
+                tool_streamer,
                 messages,
                 tools=[],
                 on_content_delta=_on_delta,
+                max_tokens=max_tokens,
             )
         finally:
             await queue.put(None)
@@ -437,6 +462,88 @@ def _normalize_tool_calls(
             )
         )
     return normalized
+
+
+def _select_tool_schemas(input_data: PromptBuildInput) -> list[dict[str, Any]]:
+    user_text = (input_data.user_message or "").casefold()
+    goal = input_data.conversation_state.current_learning_goal
+    names: list[str] = []
+    if goal == LearningGoal.ENTRY or _contains_any(user_text, ("入口", "启动", "main", "app")):
+        names.extend(["get_entry_candidates", "get_evidence"])
+    elif goal == LearningGoal.MODULE or _contains_any(user_text, ("模块", "目录", "文件结构")):
+        names.extend(["get_module_map", "get_evidence"])
+    elif goal == LearningGoal.FLOW or _contains_any(user_text, ("流程", "数据流", "主流程")):
+        names.extend(["get_reading_path", "m3.get_flow_summaries", "get_evidence"])
+    elif goal == LearningGoal.DEPENDENCY or _contains_any(user_text, ("依赖", "import", "包")):
+        names.extend(["m3.get_dependency_map", "get_evidence"])
+    elif goal == LearningGoal.LAYER or _contains_any(user_text, ("分层", "层")):
+        names.extend(["m3.get_layer_view", "get_module_map", "get_evidence"])
+    else:
+        names.extend(["get_evidence", "m4.get_topic_slice"])
+
+    if _needs_source_tools(user_text):
+        names.extend(["search_text", "read_file_excerpt"])
+    else:
+        names.append("search_text")
+    return tool_schemas_for(_dedupe_names(names)[:5])
+
+
+def _output_token_budget(input_data: PromptBuildInput) -> int:
+    budgets = {
+        PromptScenario.INITIAL_REPORT: 2400,
+        PromptScenario.FOLLOW_UP: 1400,
+        PromptScenario.GOAL_SWITCH: 1400,
+        PromptScenario.DEPTH_ADJUSTMENT: 1000,
+        PromptScenario.STAGE_SUMMARY: 1200,
+    }
+    return budgets.get(input_data.scenario, 1400)
+
+
+async def _call_tool_streamer(
+    tool_streamer: ToolAwareLlmStreamer,
+    messages: list[dict[str, Any]],
+    *,
+    tools: list[dict[str, Any]],
+    on_content_delta: Any,
+    max_tokens: int,
+) -> StreamResult:
+    kwargs: dict[str, Any] = {"tools": tools, "on_content_delta": on_content_delta}
+    if _accepts_kwarg(tool_streamer, "max_tokens"):
+        kwargs["max_tokens"] = max_tokens
+    return await tool_streamer(messages, **kwargs)
+
+
+def _accepts_kwarg(func: Any, name: str) -> bool:
+    try:
+        signature = inspect.signature(func)
+    except (TypeError, ValueError):
+        return True
+    return any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD or parameter.name == name
+        for parameter in signature.parameters.values()
+    )
+
+
+def _needs_source_tools(text: str) -> bool:
+    return _contains_any(
+        text,
+        ("代码", "源码", "函数", "类", "实现", ".py", "/", "\\", "class ", "def "),
+    )
+
+
+def _contains_any(text: str, tokens: tuple[str, ...]) -> bool:
+    return any(token.casefold() in text for token in tokens)
+
+
+def _dedupe_names(names: list[str]) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for name in names:
+        if name in seen:
+            continue
+        deduped.append(name)
+        seen.add(name)
+    return deduped
 
 
 async def _emit_after(

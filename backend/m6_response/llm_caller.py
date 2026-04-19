@@ -13,12 +13,13 @@ from typing import Any
 CONFIG_PATH = Path(__file__).resolve().parents[2] / "llm_config.json"
 DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-chat"
-DEFAULT_TIMEOUT_SECONDS = 60.0
+DEFAULT_TIMEOUT_SECONDS = 90.0
 MAX_RETRIES = 0
 ENV_API_KEY = "REPO_TUTOR_LLM_API_KEY"
 ENV_BASE_URL = "REPO_TUTOR_LLM_BASE_URL"
 ENV_MODEL = "REPO_TUTOR_LLM_MODEL"
 ENV_TIMEOUT_SECONDS = "REPO_TUTOR_LLM_TIMEOUT_SECONDS"
+ENV_MAX_TOKENS = "REPO_TUTOR_LLM_MAX_TOKENS"
 
 
 @dataclass(frozen=True)
@@ -27,6 +28,7 @@ class LlmConfig:
     base_url: str
     model: str
     timeout_seconds: float
+    max_tokens: int | None = None
 
 
 @dataclass
@@ -51,13 +53,20 @@ async def stream_llm_response(
     messages: list[dict[str, str]],
     *,
     temperature: float = 0.6,
+    max_tokens: int | None = None,
 ) -> AsyncIterator[str]:
     """Original one-shot streaming interface (no function calling)."""
     config = load_llm_config()
     try:
         from openai import APITimeoutError, AsyncOpenAI
     except ModuleNotFoundError:
-        yield await asyncio.to_thread(_complete_with_stdlib_http, config, messages, temperature)
+        yield await asyncio.to_thread(
+            _complete_with_stdlib_http,
+            config,
+            messages,
+            temperature,
+            max_tokens,
+        )
         return
 
     client = AsyncOpenAI(
@@ -74,6 +83,7 @@ async def stream_llm_response(
                 temperature=temperature,
                 stream=True,
                 timeout=config.timeout_seconds,
+                **_max_tokens_kwargs(config, max_tokens),
             )
             async for chunk in stream:
                 if not chunk.choices:
@@ -101,6 +111,7 @@ async def stream_llm_response_with_tools(
     tools: list[dict[str, Any]],
     temperature: float = 0.6,
     on_content_delta: Any | None = None,
+    max_tokens: int | None = None,
 ) -> StreamResult:
     """Single streaming call that may produce content, tool_calls, or both.
 
@@ -111,7 +122,13 @@ async def stream_llm_response_with_tools(
     try:
         from openai import APITimeoutError, AsyncOpenAI
     except ModuleNotFoundError:
-        text = await asyncio.to_thread(_complete_with_stdlib_http, config, messages, temperature)
+        text = await asyncio.to_thread(
+            _complete_with_stdlib_http,
+            config,
+            messages,
+            temperature,
+            max_tokens,
+        )
         result = StreamResult(content_chunks=[text], finish_reason="stop")
         if on_content_delta is not None:
             await on_content_delta(text)
@@ -128,6 +145,7 @@ async def stream_llm_response_with_tools(
                 "temperature": temperature,
                 "stream": True,
                 "timeout": config.timeout_seconds,
+                **_max_tokens_kwargs(config, max_tokens),
             }
             if tools:
                 request_kwargs["tools"] = tools
@@ -190,16 +208,17 @@ def _complete_with_stdlib_http(
     config: LlmConfig,
     messages: list[dict[str, str]],
     temperature: float,
+    max_tokens: int | None = None,
 ) -> str:
     endpoint = f"{config.base_url.rstrip('/')}/chat/completions"
-    body = json.dumps(
-        {
-            "model": config.model,
-            "messages": messages,
-            "temperature": temperature,
-            "stream": False,
-        }
-    ).encode("utf-8")
+    payload: dict[str, Any] = {
+        "model": config.model,
+        "messages": messages,
+        "temperature": temperature,
+        "stream": False,
+    }
+    payload.update(_max_tokens_kwargs(config, max_tokens))
+    body = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(
         endpoint,
         data=body,
@@ -261,9 +280,31 @@ def load_llm_config(config_path: Path = CONFIG_PATH) -> LlmConfig:
     except (TypeError, ValueError) as exc:
         raise RuntimeError(f"LLM 配置文件中的 timeout_seconds 非法: {config_path.name}") from exc
 
+    try:
+        max_tokens = _optional_positive_int(
+            os.getenv(ENV_MAX_TOKENS) or payload.get("max_tokens")
+        )
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"LLM 配置文件中的 max_tokens 非法: {config_path.name}") from exc
+
     return LlmConfig(
         api_key=api_key,
         base_url=base_url,
         model=model,
         timeout_seconds=timeout_seconds,
+        max_tokens=max_tokens,
     )
+
+
+def _optional_positive_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    parsed = int(value)
+    if parsed <= 0:
+        raise ValueError("max_tokens must be positive")
+    return parsed
+
+
+def _max_tokens_kwargs(config: LlmConfig, max_tokens: int | None) -> dict[str, int]:
+    effective = max_tokens if max_tokens is not None else config.max_tokens
+    return {"max_tokens": effective} if effective is not None else {}

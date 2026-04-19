@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Iterable
+from collections.abc import AsyncIterator
 
 from backend.contracts.dto import ChatSseEvent, AnalysisSseEvent
 from backend.contracts.enums import ConversationSubStatus, RuntimeEventType, SessionStatus
