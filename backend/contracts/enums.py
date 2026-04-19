@@ -67,9 +67,8 @@ class CleanupStatus(StrEnum):
 
 
 class AnalysisMode(StrEnum):
-    FULL_PYTHON = "full_python"
-    DEGRADED_LARGE_REPO = "degraded_large_repo"
-    DEGRADED_NON_PYTHON = "degraded_non_python"
+    QUICK_GUIDE = "quick_guide"
+    DEEP_RESEARCH = "deep_research"
 
 
 class SkeletonMode(StrEnum):
@@ -333,6 +332,10 @@ class AgentActivityPhase(StrEnum):
 class ProgressStepKey(StrEnum):
     REPO_ACCESS = "repo_access"
     FILE_TREE_SCAN = "file_tree_scan"
+    RESEARCH_PLANNING = "research_planning"
+    SOURCE_SWEEP = "source_sweep"
+    CHAPTER_SYNTHESIS = "chapter_synthesis"
+    FINAL_REPORT_WRITE = "final_report_write"
     ENTRY_AND_MODULE_ANALYSIS = "entry_and_module_analysis"
     DEPENDENCY_ANALYSIS = "dependency_analysis"
     SKELETON_ASSEMBLY = "skeleton_assembly"

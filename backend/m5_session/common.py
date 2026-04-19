@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 from backend.contracts.domain import ProgressStepStateItem
-from backend.contracts.enums import LearningGoal, ProgressStepKey, ProgressStepState
+from backend.contracts.enums import AnalysisMode, LearningGoal, ProgressStepKey, ProgressStepState
 
 
 def utc_now() -> datetime:
@@ -15,14 +15,27 @@ def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid4().hex[:12]}"
 
 
-def initial_progress_steps() -> list[ProgressStepStateItem]:
-    return [
-        ProgressStepStateItem(step_key=key, step_state=ProgressStepState.PENDING)
-        for key in (
+def initial_progress_steps(
+    analysis_mode: AnalysisMode = AnalysisMode.QUICK_GUIDE,
+) -> list[ProgressStepStateItem]:
+    if analysis_mode == AnalysisMode.DEEP_RESEARCH:
+        keys = (
+            ProgressStepKey.REPO_ACCESS,
+            ProgressStepKey.FILE_TREE_SCAN,
+            ProgressStepKey.RESEARCH_PLANNING,
+            ProgressStepKey.SOURCE_SWEEP,
+            ProgressStepKey.CHAPTER_SYNTHESIS,
+            ProgressStepKey.FINAL_REPORT_WRITE,
+        )
+    else:
+        keys = (
             ProgressStepKey.REPO_ACCESS,
             ProgressStepKey.FILE_TREE_SCAN,
             ProgressStepKey.INITIAL_REPORT_GENERATION,
         )
+    return [
+        ProgressStepStateItem(step_key=key, step_state=ProgressStepState.PENDING)
+        for key in keys
     ]
 
 

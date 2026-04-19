@@ -57,23 +57,26 @@ class RuntimeEventService:
         step_key: ProgressStepKey,
         step_state: ProgressStepState,
         user_notice: str,
+        *,
+        payload: dict | None = None,
     ) -> RuntimeEvent:
         for item in session.progress_steps:
             if item.step_key == step_key:
                 item.step_state = step_state
                 break
         session.updated_at = utc_now()
+        merged_payload = {
+            "progress_steps": [item.model_dump(mode="python") for item in session.progress_steps]
+        }
+        if payload:
+            merged_payload.update(payload)
         return self.append_runtime_event(
             session,
             RuntimeEventType.ANALYSIS_PROGRESS,
             step_key=step_key,
             step_state=step_state,
             user_notice=user_notice,
-            payload={
-                "progress_steps": [
-                    item.model_dump(mode="python") for item in session.progress_steps
-                ]
-            },
+            payload=merged_payload,
         )
 
     def append_runtime_event(

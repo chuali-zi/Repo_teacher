@@ -77,8 +77,10 @@ export const api = {
   validateRepo(inputValue) {
     return request("POST", "/api/repo/validate", { body: { input_value: inputValue } });
   },
-  submitRepo(inputValue) {
-    return request("POST", "/api/repo", { body: { input_value: inputValue } });
+  submitRepo(inputValue, analysisMode = "quick_guide") {
+    return request("POST", "/api/repo", {
+      body: { input_value: inputValue, analysis_mode: analysisMode },
+    });
   },
   getSession(sessionId) {
     return request("GET", "/api/session", { sessionId: sessionId || undefined });

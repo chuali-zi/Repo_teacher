@@ -12,7 +12,10 @@ def test_web_render_message_uses_raw_agent_output() -> None:
         : source.index("function renderActivityBanner")
     ]
 
-    assert "renderRawMessage(msg)" in render_message
+    assert (
+        "renderRawMessage(msg)" in render_message
+        or "renderVisibleAgentMessage(msg)" in render_message
+    )
     assert "renderInitialReport(msg)" not in render_message
     assert "renderStructuredAnswer(msg)" not in render_message
     assert "initial_report_content" not in render_message

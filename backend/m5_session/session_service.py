@@ -7,6 +7,7 @@ from pathlib import PureWindowsPath
 from backend.contracts.domain import (
     AgentActivity,
     ConversationState,
+    DeepResearchRunState,
     MessageRecord,
     ReadPolicySnapshot,
     RepositoryContext,
@@ -20,8 +21,10 @@ from backend.contracts.domain import (
 from backend.contracts.dto import (
     AgentActivityDto,
     ClearSessionData,
+    DeepResearchStateDto,
     MessageDto,
     MessageErrorStateDto,
+    RelevantSourceFileDto,
     RepositorySummaryDto,
     SendMessageData,
     SessionSnapshotDto,
@@ -33,6 +36,7 @@ from backend.contracts.dto import (
 )
 from backend.contracts.enums import (
     AgentActivityPhase,
+    AnalysisMode,
     CleanupStatus,
     ClientView,
     ConversationSubStatus,
@@ -87,7 +91,11 @@ class SessionService:
     def validate_repo_input(self, input_value: str) -> ValidateRepoData:
         return classify_repo_input(input_value)
 
-    def create_repo_session(self, input_value: str) -> SubmitRepoData:
+    def create_repo_session(
+        self,
+        input_value: str,
+        analysis_mode: AnalysisMode = AnalysisMode.QUICK_GUIDE,
+    ) -> SubmitRepoData:
         validation = self.validate_repo_input(input_value)
         if not validation.is_valid or validation.normalized_input is None:
             raise UserFacingErrorException(
@@ -103,9 +111,15 @@ class SessionService:
             status=SessionStatus.ACCESSING,
             created_at=now,
             updated_at=now,
+            analysis_mode=analysis_mode,
             repository=repository,
+            deep_research_state=(
+                DeepResearchRunState(state_id=new_id("dr"), phase="pending")
+                if analysis_mode == AnalysisMode.DEEP_RESEARCH
+                else None
+            ),
             conversation=ConversationState(current_repo_id=repository.repo_id),
-            progress_steps=initial_progress_steps(),
+            progress_steps=initial_progress_steps(analysis_mode),
             temp_resources=TempResourceSet(
                 clone_dir=None,
                 cleanup_required=repository.source_type == RepoSourceType.GITHUB_URL,
@@ -121,6 +135,7 @@ class SessionService:
             status=context.status,
             sub_status=context.conversation.sub_status,
             view=view_for_status(context.status, context.conversation.sub_status),
+            analysis_mode=context.analysis_mode,
             repository=self._repository_summary(repository),
             analysis_stream_url=f"/api/analysis/stream?session_id={session_id}",
         )
@@ -133,6 +148,8 @@ class SessionService:
                 status=SessionStatus.IDLE,
                 sub_status=None,
                 view=ClientView.INPUT,
+                analysis_mode=None,
+                deep_research_state=None,
             )
         self.assert_session_matches(session_id, allow_missing=True)
         sub_status = session.conversation.sub_status
@@ -141,6 +158,7 @@ class SessionService:
             status=session.status,
             sub_status=sub_status,
             view=view_for_status(session.status, sub_status),
+            analysis_mode=session.analysis_mode,
             repository=self._repository_summary(session.repository) if session.repository else None,
             progress_steps=session.progress_steps,
             degradation_notices=[
@@ -164,6 +182,7 @@ class SessionService:
             active_error=UserFacingErrorDto.from_domain(session.last_error)
             if session.last_error
             else None,
+            deep_research_state=self._deep_research_state_dto(session.deep_research_state),
         )
 
     def accept_chat_message(self, session_id: str, message: str) -> SendMessageData:
@@ -330,6 +349,26 @@ class SessionService:
             primary_language=repository.primary_language,
             repo_size_level=repository.repo_size_level,
             source_code_file_count=repository.source_code_file_count,
+        )
+
+    def _deep_research_state_dto(
+        self,
+        state: DeepResearchRunState | None,
+    ) -> DeepResearchStateDto | None:
+        if state is None:
+            return None
+        return DeepResearchStateDto(
+            phase=state.phase,
+            total_files=state.total_files,
+            completed_files=state.completed_files,
+            skipped_files=state.skipped_files,
+            coverage_ratio=state.coverage_ratio,
+            current_target=state.current_target,
+            last_completed_target=state.last_completed_target,
+            relevant_files=[
+                RelevantSourceFileDto.model_validate(item.model_dump(mode="python"))
+                for item in state.relevant_files
+            ],
         )
 
     def _message_dto(self, message: MessageRecord) -> MessageDto:

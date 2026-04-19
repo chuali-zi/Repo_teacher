@@ -157,6 +157,70 @@ class FileTreeSnapshot(ContractModel):
     degraded_scan_scope: ScanScope | None = None
 
 
+class RelevantSourceFile(ContractModel):
+    relative_path: str
+    selected: bool
+    source_kind: str
+    group_key: str
+    include_reason: str | None = None
+    skip_reason: str | None = None
+    size_bytes: int | None = None
+    is_python_source: bool = False
+
+
+class ResearchPacket(ContractModel):
+    packet_id: str
+    relative_path: str
+    source_kind: str
+    group_key: str
+    excerpt: str
+    symbol_names: list[str] = Field(default_factory=list)
+    import_names: list[str] = Field(default_factory=list)
+    path_tags: list[str] = Field(default_factory=list)
+    file_summary: str | None = None
+
+
+class ResearchNote(ContractModel):
+    note_id: str
+    subject_key: str
+    title: str
+    covered_files: list[str] = Field(default_factory=list)
+    responsibility_summary: str
+    key_symbols: list[str] = Field(default_factory=list)
+    import_relations: list[str] = Field(default_factory=list)
+    candidate_flows: list[str] = Field(default_factory=list)
+    evidence_refs: list[str] = Field(default_factory=list)
+    unknowns: list[str] = Field(default_factory=list)
+    next_hops: list[str] = Field(default_factory=list)
+    confidence: ConfidenceLevel
+
+
+class SynthesisNote(ContractModel):
+    section_key: str
+    title: str
+    summary: str
+    bullet_points: list[str] = Field(default_factory=list)
+    covered_files: list[str] = Field(default_factory=list)
+    evidence_refs: list[str] = Field(default_factory=list)
+    unknowns: list[str] = Field(default_factory=list)
+    confidence: ConfidenceLevel
+
+
+class DeepResearchRunState(ContractModel):
+    state_id: str
+    phase: str
+    total_files: int = 0
+    completed_files: int = 0
+    skipped_files: int = 0
+    coverage_ratio: float = 0.0
+    current_target: str | None = None
+    last_completed_target: str | None = None
+    relevant_files: list[RelevantSourceFile] = Field(default_factory=list)
+    research_notes: list[ResearchNote] = Field(default_factory=list)
+    synthesis_notes: list[SynthesisNote] = Field(default_factory=list)
+    generated_at: datetime | None = None
+
+
 class ProjectTypeCandidate(ContractModel):
     type: ProjectType
     reason: str
@@ -805,8 +869,10 @@ class SessionContext(ContractModel):
     status: SessionStatus
     created_at: datetime
     updated_at: datetime
+    analysis_mode: AnalysisMode = AnalysisMode.QUICK_GUIDE
     repository: RepositoryContext | None = None
     file_tree: FileTreeSnapshot | None = None
+    deep_research_state: DeepResearchRunState | None = None
     conversation: ConversationState
     last_error: UserFacingError | None = None
     progress_steps: list[ProgressStepStateItem] = Field(default_factory=list)

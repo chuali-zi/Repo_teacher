@@ -109,7 +109,10 @@ function handleSseEvent(kind, evt) {
       break;
 
     case "analysis_progress":
-      setState({ progressSteps: evt.progress_steps });
+      setState({
+        progressSteps: evt.progress_steps,
+        deepResearchState: evt.deep_research_state ?? getState().deepResearchState,
+      });
       // user_notice as transient toast
       if (evt.user_notice) report({ source: "analysis", level: "info", message: evt.user_notice, where: evt.step_key });
       break;
@@ -466,7 +469,7 @@ function renderRepoSummary(repo) {
 function renderStep(step) {
   return el("li", { class: "step", dataset: { state: step.step_state } },
     el("span", { class: "step__icon" }),
-    el("span", { class: "step__label" }, stepLabel(step.step_key)),
+    el("span", { class: "step__label" }, displayStepLabel(step.step_key)),
     el("span", { class: "step__hint" }, step.step_state),
   );
 }
@@ -549,6 +552,10 @@ function renderInputView(state) {
   const input = root.querySelector("#repo-input");
   const btn = root.querySelector("#repo-submit");
   const hint = root.querySelector("#repo-hint");
+  const modeInputs = Array.from(root.querySelectorAll('input[name="analysis-mode"]'));
+  const selectedMode = state.analysisMode || "quick_guide";
+
+  for (const node of modeInputs) node.checked = node.value === selectedMode;
 
   if (state.activeError) {
     hint.textContent = `${state.activeError.message}`;
@@ -603,11 +610,12 @@ function renderInputView(state) {
     if (submitting) return;
     const value = input.value.trim();
     if (!value) return;
+    const mode = root.querySelector('input[name="analysis-mode"]:checked')?.value || "quick_guide";
     submitting = true;
     btn.disabled = true;
     btn.querySelector("span").textContent = "提交中…";
     try {
-      const res = await api.submitRepo(value);
+      const res = await api.submitRepo(value, mode);
 
       // Hydrate immediate state from submit response
       setState({
@@ -615,16 +623,22 @@ function renderInputView(state) {
         status: res.data.status,
         subStatus: res.data.sub_status,
         view: res.data.view,
+        analysisMode: res.data.analysis_mode,
         repository: res.data.repository,
         activeError: null,
-        progressSteps: [
-          { step_key: "repo_access", step_state: "running" },
-          { step_key: "file_tree_scan", step_state: "pending" },
-          { step_key: "entry_and_module_analysis", step_state: "pending" },
-          { step_key: "dependency_analysis", step_state: "pending" },
-          { step_key: "skeleton_assembly", step_state: "pending" },
-          { step_key: "initial_report_generation", step_state: "pending" },
-        ],
+        progressSteps: defaultStepsForMode(res.data.analysis_mode),
+        deepResearchState: res.data.analysis_mode === "deep_research"
+          ? {
+              phase: "pending",
+              total_files: 0,
+              completed_files: 0,
+              skipped_files: 0,
+              coverage_ratio: 0,
+              current_target: null,
+              last_completed_target: null,
+              relevant_files: [],
+            }
+          : null,
         degradationNotices: [],
         messages: [],
         activeAgentActivity: null,
@@ -655,7 +669,7 @@ function renderAnalysisView(state) {
   $("#analysis-repo", root).textContent = state.repository?.display_name || "—";
 
   const stepsRoot = $("#analysis-steps", root);
-  for (const step of (state.progressSteps.length ? state.progressSteps : defaultSteps())) {
+  for (const step of (state.progressSteps.length ? state.progressSteps : defaultStepsForMode(state.analysisMode))) {
     stepsRoot.appendChild(renderStep(step));
   }
 
@@ -665,6 +679,10 @@ function renderAnalysisView(state) {
       el("strong", null, degLabel(d.type)),
       el("span", null, d.user_notice),
     ));
+  }
+
+  if (state.analysisMode === "deep_research" && state.deepResearchState) {
+    noticesRoot.appendChild(renderDeepResearchCard(state.deepResearchState));
   }
 
   // Live streaming preview area: shows raw_text from initial_report streaming msg
@@ -681,7 +699,42 @@ function renderAnalysisView(state) {
 }
 
 function defaultSteps() {
-  return Object.keys(STEP_LABELS).map((k) => ({ step_key: k, step_state: "pending" }));
+  return defaultStepsForMode(getState().analysisMode);
+}
+
+function defaultStepsForMode(mode) {
+  const keys = mode === "deep_research"
+    ? ["repo_access", "file_tree_scan", "research_planning", "source_sweep", "chapter_synthesis", "final_report_write"]
+    : ["repo_access", "file_tree_scan", "initial_report_generation"];
+  return keys.map((k) => ({ step_key: k, step_state: "pending" }));
+}
+
+function displayStepLabel(stepKey) {
+  const extra = {
+    research_planning: "Research planning",
+    source_sweep: "Source sweep",
+    chapter_synthesis: "Chapter synthesis",
+    final_report_write: "Final report",
+  };
+  return extra[stepKey] || stepLabel(stepKey);
+}
+
+function renderDeepResearchCard(state) {
+  const coverage = state.total_files > 0
+    ? `${Math.round((state.coverage_ratio || 0) * 100)}%`
+    : "0%";
+  return el(
+    "div",
+    { class: "notice" },
+    el("strong", null, "Deep research"),
+    el(
+      "div",
+      null,
+      `Phase: ${state.phase || "pending"} · Coverage: ${state.completed_files || 0}/${state.total_files || 0} (${coverage})`
+    ),
+    state.current_target ? el("div", null, `Current: ${state.current_target}`) : null,
+    state.last_completed_target ? el("div", null, `Last completed: ${state.last_completed_target}`) : null,
+  );
 }
 
 // ---------- CHAT VIEW ----------
@@ -779,7 +832,7 @@ function renderMessage(msg) {
     // streaming: just show the live text, will be replaced when message_completed arrives
     wrap.appendChild(el("pre", { class: "bubble bubble--stream", dataset: { streamId: msg.message_id } }, msg.raw_text || ""));
   } else {
-    wrap.appendChild(renderRawMessage(msg));
+    wrap.appendChild(renderVisibleAgentMessage(msg));
     const suggestions = collectMessageSuggestions(msg);
     if (suggestions.length) wrap.appendChild(renderSuggestions(suggestions));
   }
@@ -863,6 +916,35 @@ function formatToolTarget(toolName, args = {}) {
 
 function renderRawMessage(msg) {
   return el("div", { class: "bubble bubble--raw" }, renderMarkdown(msg.raw_text || "(无内容)"));
+}
+
+function renderVisibleAgentMessage(msg) {
+  if (msg.message_type !== "initial_report") return renderRawMessage(msg);
+  const headings = extractReportHeadings(msg.raw_text || "");
+  return el(
+    "div",
+    { class: "bubble bubble--raw" },
+    headings.length >= 3
+      ? el(
+          "nav",
+          { class: "report-toc" },
+          el("div", { class: "report-toc__title" }, "Report map"),
+          el("ol", { class: "report-toc__list" }, headings.map((heading) => el("li", null, heading))),
+        )
+      : null,
+    renderMarkdown(msg.raw_text || "(no content)"),
+  );
+}
+
+function extractReportHeadings(text) {
+  return String(text || "")
+    .replace(/\r/g, "")
+    .split("\n")
+    .map((line) => line.match(/^##\s+(.*)$/))
+    .filter(Boolean)
+    .map((match) => match[1].trim())
+    .filter(Boolean)
+    .slice(0, 12);
 }
 
 function collectMessageSuggestions(msg) {

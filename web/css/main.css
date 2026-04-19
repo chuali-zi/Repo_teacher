@@ -841,6 +841,25 @@ body {
 .composer__row button .arrow { font-size: 17px; transition: transform 220ms var(--ease); }
 .composer__row button:hover .arrow { transform: translateX(2px); }
 
+.mode-picker {
+  margin: 2px 0 0;
+  padding: 0;
+  border: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.mode-picker__option {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--ink-soft);
+}
+.mode-picker__option input {
+  accent-color: var(--lamp);
+}
+
 .composer__hint {
   margin: 0;
   font-size: 12px;
@@ -1413,6 +1432,27 @@ body {
 }
 .report { counter-reset: rsec; }
 .report__section { counter-increment: rsec; }
+
+.report-toc {
+  margin-bottom: 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--border-soft);
+  border-radius: 12px;
+  background: var(--bg-elevated);
+}
+.report-toc__title {
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--ink-muted);
+  margin-bottom: 8px;
+}
+.report-toc__list {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 4px;
+}
 
 .report__overview p { margin: 0; color: var(--ink); font-size: 15.5px; line-height: 1.6; }
 .report__overview p::first-letter {

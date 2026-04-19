@@ -23,7 +23,10 @@ async def validate_repo(request: ValidateRepoRequest) -> dict:
 @router.post("/repo")
 async def submit_repo(request: SubmitRepoRequest) -> JSONResponse:
     try:
-        data = session_service.create_repo_session(request.input_value)
+        data = session_service.create_repo_session(
+            request.input_value,
+            analysis_mode=request.analysis_mode,
+        )
     except UserFacingErrorException as exc:
         return error_response(None, exc.error)
     return JSONResponse(

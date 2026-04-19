@@ -8,6 +8,7 @@ from backend.contracts.dto import (
     AnswerStreamDeltaEvent,
     AnswerStreamEndEvent,
     AnswerStreamStartEvent,
+    DeepResearchStateDto,
     DegradationFlagDto,
     DegradationNoticeEvent,
     ErrorEvent,
@@ -46,6 +47,11 @@ def runtime_event_to_sse(event: RuntimeEvent) -> SseEventDto:
             step_state=event.step_state,
             user_notice=event.user_notice or "",
             progress_steps=list(event.payload.get("progress_steps", [])) if event.payload else [],
+            deep_research_state=(
+                DeepResearchStateDto.model_validate(event.payload["research_state"])
+                if event.payload and event.payload.get("research_state")
+                else None
+            ),
         )
 
     if event.event_type == RuntimeEventType.DEGRADATION_NOTICE:

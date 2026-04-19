@@ -8,6 +8,7 @@ from pydantic import Field, model_validator
 from backend.contracts.domain import ContractModel, ProgressStepStateItem, UserFacingError
 from backend.contracts.enums import (
     AgentActivityPhase,
+    AnalysisMode,
     ClientView,
     ConfidenceLevel,
     ConversationSubStatus,
@@ -56,6 +57,7 @@ class ValidateRepoRequest(ContractModel):
 
 class SubmitRepoRequest(ContractModel):
     input_value: str
+    analysis_mode: AnalysisMode = AnalysisMode.QUICK_GUIDE
 
 
 class SendMessageRequest(ContractModel):
@@ -265,17 +267,41 @@ class DegradationFlagDto(ContractModel):
     related_paths: list[str] = Field(default_factory=list)
 
 
+class RelevantSourceFileDto(ContractModel):
+    relative_path: str
+    selected: bool
+    source_kind: str
+    group_key: str
+    include_reason: str | None = None
+    skip_reason: str | None = None
+    size_bytes: int | None = None
+    is_python_source: bool = False
+
+
+class DeepResearchStateDto(ContractModel):
+    phase: str
+    total_files: int = 0
+    completed_files: int = 0
+    skipped_files: int = 0
+    coverage_ratio: float = 0.0
+    current_target: str | None = None
+    last_completed_target: str | None = None
+    relevant_files: list[RelevantSourceFileDto] = Field(default_factory=list)
+
+
 class SessionSnapshotDto(ContractModel):
     session_id: str | None
     status: SessionStatus
     sub_status: ConversationSubStatus | None
     view: ClientView
+    analysis_mode: AnalysisMode | None = None
     repository: RepositorySummaryDto | None = None
     progress_steps: list[ProgressStepStateItem] = Field(default_factory=list)
     degradation_notices: list[DegradationFlagDto] = Field(default_factory=list)
     messages: list[MessageDto] = Field(default_factory=list)
     active_agent_activity: AgentActivityDto | None = None
     active_error: UserFacingErrorDto | None = None
+    deep_research_state: DeepResearchStateDto | None = None
 
 
 class ValidateRepoData(ContractModel):
@@ -290,6 +316,7 @@ class SubmitRepoData(ContractModel):
     status: SessionStatus
     sub_status: ConversationSubStatus | None
     view: ClientView
+    analysis_mode: AnalysisMode
     repository: RepositorySummaryDto
     analysis_stream_url: str
 
@@ -333,6 +360,7 @@ class AnalysisProgressEvent(SseEventDto):
     step_state: ProgressStepState
     user_notice: str
     progress_steps: list[ProgressStepStateItem] = Field(default_factory=list)
+    deep_research_state: DeepResearchStateDto | None = None
 
 
 class DegradationNoticeEvent(SseEventDto):

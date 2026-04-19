@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from backend.contracts.dto import SubmitRepoRequest
 from backend.m5_session import session_service
 from backend.routes.analysis import analysis_stream
 from backend.routes.chat import chat_stream
@@ -43,12 +44,14 @@ def test_get_session_without_active_session_returns_idle_snapshot() -> None:
             "status": "idle",
             "sub_status": None,
             "view": "input",
+            "analysis_mode": None,
             "repository": None,
             "progress_steps": [],
             "degradation_notices": [],
             "messages": [],
             "active_agent_activity": None,
             "active_error": None,
+            "deep_research_state": None,
         },
     }
 
@@ -56,7 +59,7 @@ def test_get_session_without_active_session_returns_idle_snapshot() -> None:
 def test_submit_repo_returns_invalid_request_envelope_for_bad_input() -> None:
     session_service.clear_active_session()
 
-    response = asyncio.run(submit_repo(type("Request", (), {"input_value": "not-a-repo"})()))
+    response = asyncio.run(submit_repo(SubmitRepoRequest(input_value="not-a-repo")))
 
     payload = _decode_json_response(response.body)
     assert response.status_code == 400
@@ -64,6 +67,39 @@ def test_submit_repo_returns_invalid_request_envelope_for_bad_input() -> None:
     assert payload["session_id"] is None
     assert payload["error"]["error_code"] == "invalid_request"
     assert payload["error"]["stage"] == "idle"
+
+
+def test_submit_repo_defaults_to_quick_guide_mode() -> None:
+    session_service.clear_active_session()
+
+    response = asyncio.run(
+        submit_repo(SubmitRepoRequest(input_value=_fixture_repo("source_repo")))
+    )
+
+    payload = _decode_json_response(response.body)
+    assert response.status_code == 202
+    assert payload["ok"] is True
+    assert payload["data"]["analysis_mode"] == "quick_guide"
+    assert session_service.get_snapshot(payload["session_id"]).analysis_mode == "quick_guide"
+
+
+def test_submit_repo_accepts_deep_research_mode() -> None:
+    session_service.clear_active_session()
+
+    response = asyncio.run(
+        submit_repo(
+            SubmitRepoRequest(
+                input_value=_fixture_repo("source_repo"),
+                analysis_mode="deep_research",
+            )
+        )
+    )
+
+    payload = _decode_json_response(response.body)
+    assert response.status_code == 202
+    assert payload["ok"] is True
+    assert payload["data"]["analysis_mode"] == "deep_research"
+    assert session_service.get_snapshot(payload["session_id"]).analysis_mode == "deep_research"
 
 
 def test_analysis_stream_returns_error_event_for_stale_session() -> None:
