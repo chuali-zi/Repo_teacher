@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="rt-api-base" content="" />
+    <title>Repo Tutor | Pixel Console</title>
+
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=DotGothic16&family=Press+Start+2P&family=Share+Tech+Mono&display=swap"
+    />
+    <link rel="stylesheet" href="./css/main.css" />
+  </head>
+  <body>
+    <main class="app-shell" data-role="app-root">
+      <aside class="rail rail--left">
+        <div class="rail__scroll" id="status-panel"></div>
+      </aside>
+
+      <section class="stage">
+        <header class="stage__header" id="stage-header"></header>
+        <div class="stage__body" id="stage-body">
+          <div class="boot-card">
+            <p>Booting Repo Tutor pixel console...</p>
+          </div>
+        </div>
+        <footer class="stage__foot" id="stage-foot"></footer>
+      </section>
+
+      <aside class="rail rail--right">
+        <div class="rail__scroll" id="side-panel"></div>
+      </aside>
+    </main>
+
+    <section class="debug-panel" id="debug-panel" data-open="false" data-state="">
+      <button class="debug-panel__toggle" id="debug-toggle" type="button">
+        <span class="debug-panel__lamp" id="debug-dot"></span>
+        <span class="debug-panel__label">Debug Log</span>
+        <span class="debug-panel__count" id="debug-count">0</span>
+      </button>
+      <div class="debug-panel__body" id="debug-body" hidden>
+        <div class="debug-panel__toolbar">
+          <button id="debug-clear" type="button">Clear</button>
+          <button id="debug-copy" type="button">Copy</button>
+        </div>
+        <ul class="debug-list" id="debug-list"></ul>
+      </div>
+    </section>
+
+    <script type="module" src="./js/main.js"></script>
+  </body>
+</html>

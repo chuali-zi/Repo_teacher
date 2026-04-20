@@ -1,0 +1,1004 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="color-scheme" content="dark" />
+<title>Repo Tutor · 阅读间 [PIXEL]</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=DotGothic16&family=Share+Tech+Mono&family=Press+Start+2P&display=swap" rel="stylesheet" />
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;}
+html,body{height:100%;background:#020A12;color:#A0EED8;
+  font-family:"DotGothic16","Share Tech Mono",monospace;
+  font-size:14px;
+  -webkit-font-smoothing:none;
+  image-rendering:pixelated;}
+body{overflow:hidden;}
+
+/* CRT scanlines */
+body::after{
+  content:'';
+  position:fixed;inset:0;
+  pointer-events:none;z-index:9999;
+  background:repeating-linear-gradient(
+    0deg,
+    rgba(0,0,0,0.18) 0px,
+    rgba(0,0,0,0.18) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+}
+
+/* pixel scrollbar */
+::-webkit-scrollbar{width:8px;height:8px;}
+::-webkit-scrollbar-track{background:#020A12;border-left:1px solid #0A3050;}
+::-webkit-scrollbar-thumb{background:#0A5070;border:1px solid #0D7090;}
+::-webkit-scrollbar-thumb:hover{background:#00A880;}
+::selection{background:rgba(0,229,176,0.25);color:#00FFD0;}
+
+@keyframes blink{0%,49%{opacity:1;}50%,100%{opacity:0;}}
+@keyframes scanRun{from{background-position:0 0;}to{background-position:0 100%;}}
+@keyframes glow{0%,100%{text-shadow:0 0 6px #00E5B0,0 0 2px #00E5B0;}50%{text-shadow:0 0 14px #00FFD0,0 0 4px #00FFD0;}}
+@keyframes fadeUp{from{opacity:0;transform:translateY(6px);}to{opacity:1;transform:translateY(0);}}
+@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(0,229,176,0.5);}70%{box-shadow:0 0 0 8px rgba(0,229,176,0);}100%{box-shadow:0 0 0 0 rgba(0,229,176,0);}}
+@keyframes march{0%{background-position:0 0;}100%{background-position:16px 0;}}
+@keyframes spin{to{transform:rotate(360deg);}}
+
+.blink{animation:blink 1s step-end infinite;}
+.fade-up{animation:fadeUp 280ms ease both;}
+.glow-text{animation:glow 2s ease-in-out infinite;}
+
+/* marching ants border (active items) */
+.march{
+  background-image:repeating-linear-gradient(90deg,#00E5B0 0,#00E5B0 6px,transparent 6px,transparent 12px);
+  background-size:16px 1px;
+  background-position:0 bottom;
+  background-repeat:repeat-x;
+  animation:march 0.6s linear infinite;
+}
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script>
+const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
+  "theme": "teal",
+  "showLeftPanel": true,
+  "showRightPanel": true,
+  "scanlines": false,
+  "glowIntensity": "medium"
+}/*EDITMODE-END*/;
+</script>
+
+<script type="text/babel">
+const {useState,useEffect,useRef,useCallback} = React;
+
+// ── Pixel design tokens ──────────────────────────────────────
+const C={
+  bg:'#020A12', bgP:'#030E1A', bgE:'#051828', bgR:'#071F34', bgD:'#010508',
+  bdr:'#0A3250', bdrS:'#083048', bdrX:'#0D5070', bdrA:'#00604A',
+  ink:'#A0EED8', inkS:'#70C8B0', inkM:'#408A72', inkD:'#1E4838', inkF:'#0E2820',
+  teal:'#00E5B0', tealB:'#00FFD0', tealD:'#009870',
+  tealG:'rgba(0,229,176,0.12)', tealV:'rgba(0,229,176,0.06)',
+  blue:'#0099EE', blueB:'#22CCFF', blueD:'#006699',
+  blueG:'rgba(0,153,238,0.12)',
+  rust:'#FF4466', ivy:'#00CC88', plum:'#9966FF', amber:'#FFAA00',
+};
+
+const FF={
+  px:'"Press Start 2P",monospace',
+  dot:'"DotGothic16","Share Tech Mono",monospace',
+  mono:'"Share Tech Mono","JetBrains Mono",monospace',
+};
+
+// ── glow helpers ─────────────────────────────────────────────
+const glow=(col=C.teal,r=8)=>`0 0 ${r}px ${col},0 0 ${Math.round(r/3)}px ${col}`;
+const textGlow=(col=C.teal)=>`0 0 8px ${col},0 0 2px ${col}`;
+
+// ── Mock data ────────────────────────────────────────────────
+const STEPS=[
+  {key:'repo_access',label:'REPO ACCESS'},
+  {key:'file_tree_scan',label:'FILE TREE SCAN'},
+  {key:'entry_module',label:'ENTRY DETECTION'},
+  {key:'dependency',label:'DEP ANALYSIS'},
+  {key:'skeleton',label:'SKELETON BUILD'},
+  {key:'report_gen',label:'REPORT GEN'},
+];
+
+const INIT_REPORT=`> REPO ANALYSIS COMPLETE
+> LANG: Python  CONFIDENCE: HIGH
+> TYPE: FastAPI Service + ES Modules Frontend
+
+## 仓库概览
+
+这是一个 Python 源码教学 Agent，以 FastAPI 为后端、原生 ES Modules 为前端。系统通过 SSE 将分析进度与 LLM 回答实时推送给前端。
+
+## 先抓什么
+
+▸ 入口候选   backend/main.py
+▸ 中控模块   backend/m5_session/
+▸ 契约层     backend/contracts/
+
+## 关键目录
+
+  contracts/    领域模型与 DTO
+  m5_session/   状态机与工作流 [最重要]
+  m6_response/  LLM 调用 + 流式解析
+  routes/       HTTP/SSE 薄路由层
+  web/js/       原生前端
+
+## 推荐第一步
+
+contracts/enums.py → main.py → m5_session/session_service.py
+约 15 分钟可建立整体系统地图。`;
+
+const ANSWER_TEXT=`[本轮重点] 候选启动链路：main.py → routes → session_service
+
+FastAPI 在 backend/main.py 初始化，路由通过 include_router 挂载。
+会话创建候选链路：
+
+  POST /api/repo
+    → routes/repo.py
+    → session_service.create_repo_session()
+    → AnalysisWorkflow
+
+[与整体关系] 这是系统的启动骨架，理解后分析与聊天工作流均可顺次跟进。
+
+[判断依据]
+  § backend/main.py        FastAPI 实例
+  § backend/routes/        薄路由适配层
+  § m5_session/service.py  会话服务入口
+
+[不确定项]
+  ? 数据库初始化位置未确认
+  ? analysis_workflow 分流条件需读源码核实`;
+
+let _dbId=0;
+const mkLog=(level,src,msg)=>({id:++_dbId,level,src,msg,
+  t:new Date().toLocaleTimeString('zh',{hour:'2-digit',minute:'2-digit',second:'2-digit'})});
+
+// ── Pixel Box component ──────────────────────────────────────
+const PxBox=({children,accent=false,glow:g=false,style={},...rest})=>(
+  <div style={{
+    border:`1px solid ${accent?C.teal:C.bdrX}`,
+    background:accent?C.tealV:C.bgE,
+    boxShadow:g?`0 0 12px ${C.tealG},inset 0 0 8px ${C.tealV}`:'none',
+    position:'relative',
+    ...style
+  }} {...rest}>
+    {/* corner pixels */}
+    <div style={{position:'absolute',top:-1,left:-1,width:4,height:4,background:accent?C.teal:C.bdrX}}/>
+    <div style={{position:'absolute',top:-1,right:-1,width:4,height:4,background:accent?C.teal:C.bdrX}}/>
+    <div style={{position:'absolute',bottom:-1,left:-1,width:4,height:4,background:accent?C.teal:C.bdrX}}/>
+    <div style={{position:'absolute',bottom:-1,right:-1,width:4,height:4,background:accent?C.teal:C.bdrX}}/>
+    {children}
+  </div>
+);
+
+// ── Pixel label ──────────────────────────────────────────────
+const PxLabel=({children,color=C.inkM,style={}})=>(
+  <span style={{fontFamily:FF.mono,fontSize:9,letterSpacing:'0.2em',textTransform:'uppercase',color,...style}}>
+    {children}
+  </span>
+);
+
+// ── Step row ─────────────────────────────────────────────────
+const StepRow=({step})=>{
+  const stateSymbol={pending:'[ ]',running:'[>]',done:'[✓]',error:'[!]'};
+  const stateColor={pending:C.inkD,running:C.teal,done:C.ivy,error:C.rust};
+  return (
+    <div style={{display:'flex',gap:10,alignItems:'center',padding:'5px 8px',
+      background:step.st==='running'?C.tealV:'transparent',
+      borderLeft:`2px solid ${step.st==='running'?C.teal:step.st==='done'?C.ivy:C.bdrX}`,
+      transition:'all 200ms ease'}}>
+      <span style={{fontFamily:FF.mono,fontSize:11,color:stateColor[step.st]||C.inkD,
+        textShadow:step.st==='running'?textGlow(C.teal):step.st==='done'?textGlow(C.ivy):'none',
+        minWidth:30}}>{stateSymbol[step.st]||'[ ]'}</span>
+      <span style={{fontFamily:FF.mono,fontSize:11,color:step.st==='running'?C.tealB:step.st==='done'?C.inkS:C.inkM,
+        letterSpacing:'0.08em'}}>{step.label}</span>
+      {step.st==='running'&&<span className="blink" style={{color:C.teal,fontFamily:FF.mono,fontSize:11}}>_</span>}
+    </div>
+  );
+};
+
+// ── LEFT PANEL ───────────────────────────────────────────────
+const LeftPanel=({view,steps,repo,status,subStatus,teachState,msgCount})=>{
+  const statusMap={idle:'IDLE',accessing:'ACCESSING',analyzing:'ANALYZING',chatting:'CHATTING',access_error:'ERR:ACCESS',analysis_error:'ERR:ANALYSIS'};
+  const statusColor={chatting:C.ivy,analyzing:C.teal,accessing:C.blue}[status]||C.inkM;
+  const isActive=['analyzing','accessing'].includes(status)||['agent_thinking','agent_streaming'].includes(subStatus);
+
+  return (
+    <div style={{height:'100%',display:'flex',flexDirection:'column',background:C.bgP,
+      borderRight:`1px solid ${C.bdrX}`,overflow:'hidden'}}>
+      <div style={{flex:1,overflowY:'auto',padding:'12px 10px',display:'flex',flexDirection:'column',gap:8}}>
+
+        {/* Brand */}
+        <div style={{padding:'8px 0 10px',borderBottom:`1px solid ${C.bdrX}`,marginBottom:2}}>
+          <div style={{fontFamily:FF.px,fontSize:9,color:C.teal,textShadow:textGlow(C.teal),letterSpacing:'0.1em',marginBottom:6}}>
+            REPO TUTOR
+          </div>
+          <div style={{fontFamily:FF.mono,fontSize:10,color:C.inkM,letterSpacing:'0.16em'}}>
+            // 阅读间 · AGENT SYS
+          </div>
+        </div>
+
+        {/* Session Status */}
+        <PxBox accent={isActive} glow={isActive} style={{padding:'8px 10px',display:'flex',flexDirection:'column',gap:6}}>
+          <PxLabel>SESSION STATUS</PxLabel>
+          <div style={{display:'flex',alignItems:'center',gap:8}}>
+            <div style={{width:8,height:8,background:statusColor,
+              boxShadow:glow(statusColor,6),
+              animation:isActive?'pulse 1.4s ease-out infinite':'none'}}/>
+            <span style={{fontFamily:FF.mono,fontSize:12,color:statusColor,
+              textShadow:textGlow(statusColor),letterSpacing:'0.1em'}}>
+              {statusMap[status]||status}
+            </span>
+          </div>
+          {subStatus&&(
+            <div style={{fontFamily:FF.mono,fontSize:10,color:C.blueB,paddingLeft:16,letterSpacing:'0.06em'}}>
+              → {subStatus.replace(/_/g,' ').toUpperCase()}
+            </div>
+          )}
+          {repo&&<>
+            <div style={{height:1,background:C.bdrX,margin:'2px 0'}}/>
+            <PxLabel>REPOSITORY</PxLabel>
+            <div style={{fontFamily:FF.mono,fontSize:11,color:C.tealB,wordBreak:'break-all',letterSpacing:'0.04em'}}>
+              {repo.length>34?'…'+repo.slice(-32):repo}
+            </div>
+            <div style={{display:'flex',gap:6}}>
+              {['Python','small'].map(t=>(
+                <span key={t} style={{fontFamily:FF.mono,fontSize:9,padding:'2px 6px',border:`1px solid ${C.bdrX}`,color:C.inkM,letterSpacing:'0.08em'}}>{t.toUpperCase()}</span>
+              ))}
+            </div>
+          </>}
+        </PxBox>
+
+        {/* Analysis Steps */}
+        {(view==='analyzing'||view==='chatting')&&(
+          <PxBox style={{padding:'8px 10px',display:'flex',flexDirection:'column',gap:4}}>
+            <PxLabel style={{marginBottom:4}}>ANALYSIS PIPELINE</PxLabel>
+            {steps.map(s=><StepRow key={s.key} step={s}/>)}
+          </PxBox>
+        )}
+
+        {/* Teaching State */}
+        {view==='chatting'&&teachState&&(
+          <PxBox style={{padding:'8px 10px',display:'flex',flexDirection:'column',gap:7}}>
+            <PxLabel>TEACHING STATE</PxLabel>
+            <div>
+              <PxLabel color={C.inkD}>GOAL</PxLabel>
+              <div style={{fontFamily:FF.mono,fontSize:11,color:C.teal,marginTop:2}}>{teachState.goal}</div>
+            </div>
+            <div>
+              <PxLabel color={C.inkD}>DEPTH LEVEL</PxLabel>
+              <div style={{display:'flex',gap:4,marginTop:4}}>
+                {['浅','默认','深'].map(d=>(
+                  <span key={d} style={{fontFamily:FF.mono,fontSize:10,padding:'2px 8px',
+                    border:`1px solid ${teachState.depth===d?C.teal:C.bdrX}`,
+                    color:teachState.depth===d?C.tealB:C.inkD,
+                    background:teachState.depth===d?C.tealV:'transparent',
+                    textShadow:teachState.depth===d?textGlow(C.teal):'none'}}>
+                    {d}
+                  </span>
+                ))}
+              </div>
+            </div>
+            <div>
+              <PxLabel color={C.inkD}>COVERED TOPICS</PxLabel>
+              <div style={{display:'flex',gap:4,flexWrap:'wrap',marginTop:4}}>
+                {teachState.covered.map(t=>(
+                  <span key={t} style={{fontFamily:FF.mono,fontSize:9,padding:'1px 6px',
+                    border:`1px solid ${C.ivy}`,color:C.ivy,background:'rgba(0,204,136,0.08)',
+                    textShadow:textGlow(C.ivy)}}>{t.toUpperCase()}</span>
+                ))}
+              </div>
+            </div>
+            <div style={{fontFamily:FF.mono,fontSize:10,color:C.inkM,borderTop:`1px solid ${C.bdrX}`,paddingTop:6}}>
+              MSG COUNT: {msgCount}
+            </div>
+          </PxBox>
+        )}
+
+        {/* Agent Activity */}
+        {isActive&&(
+          <PxBox accent glow style={{padding:'10px 10px',display:'flex',flexDirection:'column',gap:5}}>
+            <div style={{display:'flex',gap:6,alignItems:'center'}}>
+              <PxLabel color={C.teal}>AGENT ACTIVITY</PxLabel>
+              <span className="blink" style={{color:C.teal,fontFamily:FF.mono,fontSize:11}}>█</span>
+            </div>
+            <div style={{fontFamily:FF.mono,fontSize:11,color:C.tealB,lineHeight:1.6}}>
+              {subStatus==='agent_thinking'?'> BUILDING PROMPT CONTEXT...':
+               subStatus==='agent_streaming'?'> STREAMING OUTPUT...':
+               '> SCANNING FILE TREE...'}
+            </div>
+            <div style={{fontFamily:FF.mono,fontSize:9,color:C.inkM,letterSpacing:'0.08em'}}>
+              {subStatus==='agent_thinking'?'tool_loop::context_budget':
+               subStatus==='agent_streaming'?'m6_response::stream':
+               'm2_file_tree::static_analysis'}
+            </div>
+          </PxBox>
+        )}
+
+      </div>
+    </div>
+  );
+};
+
+// ── CENTER PANEL ─────────────────────────────────────────────
+const CenterPanel=({view,steps,repoInput,setRepoInput,onSubmit,onSend,messages,inputDisabled,streaming,analysisStream})=>{
+  const threadRef=useRef(null);
+  useEffect(()=>{if(threadRef.current)threadRef.current.scrollTop=threadRef.current.scrollHeight;},[messages,streaming]);
+
+  if(view==='input') return (
+    <div style={{flex:1,overflowY:'auto',padding:'5vh 48px 48px',display:'flex',flexDirection:'column',gap:28,maxWidth:740,margin:'0 auto',width:'100%'}}>
+
+      {/* ASCII hero */}
+      <div>
+        <pre style={{fontFamily:FF.mono,fontSize:9,color:C.tealD,lineHeight:1.4,marginBottom:16,letterSpacing:'0.06em',userSelect:'none'}}>
+{`╔══════════════════════════════════════╗
+║  REPO TUTOR  //  SOURCE CODE READER  ║
+║  VERSION 1.0.0  //  READ-ONLY MODE   ║
+╚══════════════════════════════════════╝`}
+        </pre>
+        <div style={{fontFamily:FF.mono,fontSize:13,color:C.inkS,maxWidth:'52ch',lineHeight:1.8}}>
+          粘贴本地路径或 GitHub 公开仓库 URL。<br/>
+          <span style={{color:C.inkM}}>// 我会先观察骨架，再陪你逐层走进去。</span>
+        </div>
+      </div>
+
+      <PxBox glow style={{padding:'18px 20px',display:'flex',flexDirection:'column',gap:12}}>
+        <PxLabel color={C.teal}>INPUT REPOSITORY</PxLabel>
+        <form onSubmit={onSubmit} style={{display:'flex',flexDirection:'column',gap:10}}>
+          <div style={{display:'flex',gap:0,border:`1px solid ${C.bdrX}`,background:C.bgD}}>
+            <span style={{fontFamily:FF.mono,fontSize:13,color:C.teal,padding:'10px 10px',borderRight:`1px solid ${C.bdrX}`,userSelect:'none',textShadow:textGlow(C.teal)}}>▶</span>
+            <input value={repoInput} onChange={e=>setRepoInput(e.target.value)}
+              placeholder="C:\path\to\repo  |  https://github.com/owner/repo"
+              style={{flex:1,background:'transparent',border:0,outline:0,fontFamily:FF.mono,fontSize:13,color:C.tealB,padding:'10px 12px',caretColor:C.teal}}
+              spellCheck={false}/>
+          </div>
+          <div style={{display:'flex',alignItems:'center',gap:16}}>
+            <div style={{display:'flex',gap:14}}>
+              {['Quick guide','Deep research'].map((m,i)=>(
+                <label key={m} style={{display:'flex',alignItems:'center',gap:7,fontFamily:FF.mono,fontSize:11,color:C.inkS,cursor:'pointer',letterSpacing:'0.06em'}}>
+                  <input type="radio" name="mode" defaultChecked={i===0} style={{accentColor:C.teal}}/>{m.toUpperCase()}
+                </label>
+              ))}
+            </div>
+            <PxBtn onClick={()=>{}} type="submit" style={{marginLeft:'auto'}}>START →</PxBtn>
+          </div>
+        </form>
+        <div style={{fontFamily:FF.mono,fontSize:10,color:C.inkD,borderTop:`1px solid ${C.bdrX}`,paddingTop:8,lineHeight:1.6}}>
+          // Python repos: full teaching mode<br/>
+          // Other languages: file-tree overview
+        </div>
+      </PxBox>
+
+      {/* Examples */}
+      <div style={{display:'flex',flexDirection:'column',gap:6}}>
+        <PxLabel>EXAMPLES</PxLabel>
+        {['https://github.com/pallets/flask','https://github.com/tiangolo/fastapi','C:\\Users\\you\\projects\\demo'].map(ex=>(
+          <div key={ex} onClick={()=>setRepoInput(ex)} style={{fontFamily:FF.mono,fontSize:11,color:C.inkM,padding:'5px 10px',border:`1px solid ${C.bdrX}`,cursor:'pointer',transition:'all 150ms ease',background:C.bgD,letterSpacing:'0.04em'}}
+            onMouseEnter={e=>{e.currentTarget.style.borderColor=C.teal;e.currentTarget.style.color=C.tealB;e.currentTarget.style.background=C.tealV;}}
+            onMouseLeave={e=>{e.currentTarget.style.borderColor=C.bdrX;e.currentTarget.style.color=C.inkM;e.currentTarget.style.background=C.bgD;}}>
+            {'>'} {ex}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+
+  if(view==='analyzing') return (
+    <div style={{flex:1,overflowY:'auto',padding:'24px 48px'}}>
+      <PxBox glow style={{maxWidth:680,margin:'0 auto',padding:'24px 24px 20px',display:'flex',flexDirection:'column',gap:16}}>
+        <div>
+          <div className="glow-text" style={{fontFamily:FF.px,fontSize:10,color:C.teal,letterSpacing:'0.12em',marginBottom:8}}>ANALYZING</div>
+          <div style={{fontFamily:FF.mono,fontSize:15,color:C.tealB,wordBreak:'break-all',letterSpacing:'0.04em'}}>{repoInput||'owner/repo'}</div>
+          <div style={{fontFamily:FF.mono,fontSize:10,color:C.inkM,marginTop:4}}>// small repo · est. &lt; 30s</div>
+        </div>
+        <div style={{height:1,background:`linear-gradient(90deg,${C.teal},transparent)`,boxShadow:glow(C.teal,4)}}/>
+        <div style={{display:'flex',flexDirection:'column',gap:3}}>
+          {steps.map(s=>(
+            <div key={s.key} style={{display:'flex',alignItems:'center',gap:10,padding:'9px 12px',
+              background:s.st==='running'?C.tealV:s.st==='done'?'rgba(0,204,136,0.04)':'transparent',
+              borderLeft:`2px solid ${s.st==='running'?C.teal:s.st==='done'?C.ivy:C.bdrX}`,
+              transition:'all 200ms ease'}}>
+              <span style={{fontFamily:FF.mono,fontSize:12,color:s.st==='running'?C.teal:s.st==='done'?C.ivy:C.inkD,
+                textShadow:s.st==='running'?textGlow(C.teal):s.st==='done'?textGlow(C.ivy):'none',width:24}}>
+                {s.st==='done'?'[✓]':s.st==='running'?'[>]':s.st==='error'?'[!]':'[ ]'}
+              </span>
+              <span style={{fontFamily:FF.mono,fontSize:12,color:s.st==='running'?C.tealB:s.st==='done'?C.inkS:C.inkD,letterSpacing:'0.08em'}}>{s.label}</span>
+              {s.st==='running'&&<span style={{marginLeft:'auto',fontFamily:FF.mono,fontSize:10,color:C.teal}}>RUNNING<span className="blink">_</span></span>}
+              {s.st==='done'&&<span style={{marginLeft:'auto',fontFamily:FF.mono,fontSize:10,color:C.ivy}}>DONE</span>}
+            </div>
+          ))}
+        </div>
+        {analysisStream&&(
+          <div style={{borderTop:`1px solid ${C.bdrX}`,paddingTop:12}}>
+            <PxLabel color={C.teal} style={{display:'block',marginBottom:8}}>REPORT STREAM</PxLabel>
+            <div style={{background:C.bgD,border:`1px solid ${C.bdrX}`,padding:'12px 14px',fontFamily:FF.mono,fontSize:12,color:C.inkS,lineHeight:1.8,maxHeight:200,overflowY:'auto',whiteSpace:'pre-wrap',letterSpacing:'0.02em'}}>
+              {analysisStream}<span className="blink" style={{color:C.teal}}>█</span>
+            </div>
+          </div>
+        )}
+      </PxBox>
+    </div>
+  );
+
+  // Chat view
+  return (
+    <div style={{flex:1,display:'flex',flexDirection:'column',minHeight:0}}>
+      <div ref={threadRef} style={{flex:1,overflowY:'auto',padding:'20px 32px',display:'flex',flexDirection:'column',gap:18}}>
+        {messages.map(msg=>(
+          <div key={msg.id} className="fade-up">
+            {/* Role header */}
+            <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:7}}>
+              <span style={{fontFamily:FF.mono,fontSize:10,letterSpacing:'0.14em',padding:'2px 8px',
+                border:`1px solid ${msg.role==='user'?C.blue:C.teal}`,
+                color:msg.role==='user'?C.blueB:C.teal,
+                background:msg.role==='user'?C.blueG:C.tealV,
+                textShadow:textGlow(msg.role==='user'?C.blue:C.teal)}}>
+                {msg.role==='user'?'USER ▶':'AGENT ◈'}
+              </span>
+              <span style={{fontFamily:FF.mono,fontSize:9,color:C.inkD}}>{msg.time}</span>
+              {msg.role==='agent'&&!msg.streaming&&<span style={{fontFamily:FF.mono,fontSize:9,color:C.ivy,marginLeft:'auto'}}>// DONE</span>}
+            </div>
+
+            {msg.role==='user'?(
+              <div style={{background:C.bgR,border:`1px solid ${C.blue}`,padding:'12px 16px',
+                boxShadow:`0 0 10px ${C.blueG}`,position:'relative'}}>
+                <span style={{position:'absolute',top:8,left:10,fontFamily:FF.mono,fontSize:14,color:C.blueD,opacity:0.6}}>▶</span>
+                <div style={{fontFamily:FF.mono,fontSize:13,color:C.inkS,lineHeight:1.7,paddingLeft:20}}>
+                  {msg.content}
+                </div>
+              </div>
+            ):(
+              <PxBox accent={!msg.streaming} glow={!msg.streaming} style={{padding:'14px 16px',display:'flex',flexDirection:'column',gap:10}}>
+                <div style={{fontFamily:FF.mono,fontSize:12.5,color:C.ink,lineHeight:1.8,whiteSpace:'pre-wrap',letterSpacing:'0.02em'}}>
+                  {msg.content}
+                  {msg.streaming&&<span className="blink" style={{color:C.teal}}>█</span>}
+                </div>
+                {msg.suggestions&&!msg.streaming&&(
+                  <div style={{borderTop:`1px solid ${C.bdrX}`,paddingTop:8,display:'flex',flexWrap:'wrap',gap:6}}>
+                    {msg.suggestions.map(s=>(
+                      <button key={s} onClick={()=>onSend(s)}
+                        style={{background:C.bgD,border:`1px solid ${C.bdrX}`,color:C.inkS,padding:'5px 12px',
+                          fontFamily:FF.mono,fontSize:11,cursor:'pointer',letterSpacing:'0.04em',transition:'all 150ms ease'}}
+                        onMouseEnter={e=>{e.target.style.borderColor=C.teal;e.target.style.color=C.tealB;e.target.style.background=C.tealV;e.target.style.textShadow=textGlow(C.teal);}}
+                        onMouseLeave={e=>{e.target.style.borderColor=C.bdrX;e.target.style.color=C.inkS;e.target.style.background=C.bgD;e.target.style.textShadow='none';}}>
+                        ↳ {s}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </PxBox>
+            )}
+          </div>
+        ))}
+        {streaming&&(
+          <div style={{fontFamily:FF.mono,fontSize:12,color:C.teal,display:'flex',gap:8,padding:'4px 0',
+            textShadow:textGlow(C.teal)}}>
+            <span>AGENT THINKING</span>
+            <span className="blink">▌</span>
+          </div>
+        )}
+      </div>
+
+      {/* Composer */}
+      <div style={{padding:'10px 32px 18px',borderTop:`1px solid ${C.bdrX}`,background:C.bgP}}>
+        <PixelComposer onSend={onSend} disabled={inputDisabled}/>
+      </div>
+    </div>
+  );
+};
+
+const PxBtn=({children,onClick,type='button',style={}})=>(
+  <button type={type} onClick={onClick}
+    style={{background:C.tealD,border:`1px solid ${C.teal}`,color:C.bgD,
+      fontFamily:FF.mono,fontSize:11,padding:'8px 16px',cursor:'pointer',
+      letterSpacing:'0.1em',textTransform:'uppercase',
+      boxShadow:glow(C.teal,6),transition:'all 150ms ease',...style}}
+    onMouseEnter={e=>{e.currentTarget.style.background=C.teal;e.currentTarget.style.boxShadow=glow(C.teal,12);}}
+    onMouseLeave={e=>{e.currentTarget.style.background=C.tealD;e.currentTarget.style.boxShadow=glow(C.teal,6);}}>
+    {children}
+  </button>
+);
+
+const PixelComposer=({onSend,disabled})=>{
+  const [val,setVal]=useState('');
+  const submit=e=>{e.preventDefault();if(val.trim()&&!disabled){onSend(val.trim());setVal('');}};
+  return (
+    <form onSubmit={submit} style={{display:'flex',gap:8,alignItems:'flex-end'}}>
+      <div style={{flex:1,border:`1px solid ${disabled?C.bdrX:C.teal}`,background:C.bgD,display:'flex',
+        boxShadow:disabled?'none':glow(C.teal,4),transition:'all 200ms ease'}}>
+        <span style={{fontFamily:FF.mono,fontSize:12,color:disabled?C.inkD:C.teal,padding:'10px 10px',borderRight:`1px solid ${C.bdrX}`,userSelect:'none'}}>
+          {disabled?'░':'▶'}
+        </span>
+        <textarea value={val} onChange={e=>setVal(e.target.value)} disabled={disabled} rows={1}
+          placeholder={disabled?'// AGENT IS THINKING...':'// 输入你的问题，或点击上方建议…'}
+          onKeyDown={e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();submit(e);}}}
+          style={{flex:1,background:'transparent',border:0,outline:0,resize:'none',
+            fontFamily:FF.mono,color:disabled?C.inkD:C.tealB,fontSize:13,
+            padding:'9px 12px',maxHeight:140,lineHeight:1.6,caretColor:C.teal}}/>
+      </div>
+      <button type="submit" disabled={!val.trim()||disabled}
+        style={{background:val.trim()&&!disabled?C.teal:C.bgR,border:`1px solid ${val.trim()&&!disabled?C.teal:C.bdrX}`,
+          color:val.trim()&&!disabled?C.bgD:C.inkD,padding:'10px 14px',cursor:val.trim()&&!disabled?'pointer':'not-allowed',
+          fontFamily:FF.mono,fontSize:12,letterSpacing:'0.1em',
+          boxShadow:val.trim()&&!disabled?glow(C.teal,6):'none',transition:'all 150ms ease'}}>
+        SEND
+      </button>
+    </form>
+  );
+};
+
+// ── RIGHT PANEL ──────────────────────────────────────────────
+const RightPanel=({view,messages})=>{
+  const [term,setTerm]=useState('');
+  const [answer,setAnswer]=useState('');
+  const [loading,setLoading]=useState(false);
+
+  const askTerm=async(e)=>{
+    e.preventDefault();
+    if(!term.trim())return;
+    setLoading(true);setAnswer('');
+    await new Promise(r=>setTimeout(r,900));
+    setAnswer(`// ${term.toUpperCase()}\n\n在当前架构中，这是模块间数据交换的标准化传输对象。它将内部领域模型与外部接口解耦，确保 API 只暴露必要字段，不泄露内部实现细节。`);
+    setLoading(false);
+  };
+
+  return (
+    <div style={{height:'100%',display:'flex',flexDirection:'column',background:C.bgP,
+      borderLeft:`1px solid ${C.bdrX}`,overflow:'hidden'}}>
+      <div style={{flex:1,overflowY:'auto',padding:'12px 10px',display:'flex',flexDirection:'column',gap:8}}>
+
+        <div style={{paddingBottom:10,borderBottom:`1px dashed ${C.bdrX}`}}>
+          <PxLabel color={C.teal}>SIDECAR // 术语解释</PxLabel>
+        </div>
+
+        {/* Term lookup */}
+        <PxBox glow style={{padding:'12px 12px',display:'flex',flexDirection:'column',gap:10}}>
+          <div style={{fontFamily:FF.mono,fontSize:12,color:C.tealB,lineHeight:1.6}}>
+            遇到不懂的词？
+          </div>
+          <div style={{fontFamily:FF.mono,fontSize:10,color:C.inkM}}>// 输入术语获取简短解释</div>
+          <form onSubmit={askTerm} style={{display:'flex',flexDirection:'column',gap:8}}>
+            <div style={{border:`1px solid ${C.bdrX}`,background:C.bgD,display:'flex'}}>
+              <span style={{fontFamily:FF.mono,fontSize:11,color:C.teal,padding:'8px 8px',borderRight:`1px solid ${C.bdrX}`,userSelect:'none'}}>?</span>
+              <textarea value={term} onChange={e=>setTerm(e.target.value)} rows={2} placeholder="DTO, SSE, session_id..."
+                style={{flex:1,background:'transparent',border:0,outline:0,resize:'none',fontFamily:FF.mono,fontSize:12,color:C.tealB,padding:'8px 10px',lineHeight:1.6,caretColor:C.teal}}/>
+            </div>
+            <PxBtn type="submit" style={{alignSelf:'stretch',justifyContent:'center',textAlign:'center'}}>
+              {loading?'QUERYING...':'EXPLAIN >>'}
+            </PxBtn>
+          </form>
+          {(loading||answer)&&(
+            <div style={{border:`1px solid ${C.bdrA}`,background:C.bgD,padding:'10px 12px',boxShadow:`0 0 8px ${C.tealG}`}}>
+              <PxLabel color={C.teal} style={{display:'block',marginBottom:6}}>OUTPUT</PxLabel>
+              {loading?
+                <div style={{fontFamily:FF.mono,fontSize:11,color:C.inkM}}>PROCESSING<span className="blink">_</span></div>:
+                <div style={{fontFamily:FF.mono,fontSize:11,color:C.inkS,lineHeight:1.8,whiteSpace:'pre-wrap'}}>{answer}</div>
+              }
+            </div>
+          )}
+        </PxBox>
+
+        {/* Suggestions */}
+        {view==='chatting'&&(
+          <PxBox style={{padding:'10px 10px',display:'flex',flexDirection:'column',gap:7}}>
+            <PxLabel>RELATED QUERIES</PxLabel>
+            {['m5_session 状态机边界？','SSE 断线重连机制？','deep_research vs quick_guide？'].map(q=>(
+              <div key={q} style={{fontFamily:FF.mono,fontSize:11,color:C.inkM,padding:'6px 8px',
+                border:`1px solid ${C.bdrX}`,background:C.bgD,cursor:'pointer',
+                lineHeight:1.5,transition:'all 150ms ease',letterSpacing:'0.02em'}}
+                onMouseEnter={e=>{e.currentTarget.style.borderColor=C.teal;e.currentTarget.style.color=C.tealB;e.currentTarget.style.background=C.tealV;}}
+                onMouseLeave={e=>{e.currentTarget.style.borderColor=C.bdrX;e.currentTarget.style.color=C.inkM;e.currentTarget.style.background=C.bgD;}}>
+                ↳ {q}
+              </div>
+            ))}
+          </PxBox>
+        )}
+
+        {/* Evidence refs */}
+        {view==='chatting'&&messages.filter(m=>m.role==='agent').length>0&&(
+          <PxBox style={{padding:'10px 10px',display:'flex',flexDirection:'column',gap:5}}>
+            <PxLabel>EVIDENCE REFS</PxLabel>
+            {['backend/contracts/enums.py','backend/m5_session/session_service.py','backend/routes/repo.py','backend/main.py'].map(f=>(
+              <div key={f} style={{fontFamily:FF.mono,fontSize:10,color:C.inkM,padding:'4px 8px',
+                borderLeft:`2px solid ${C.tealD}`,background:C.bgD,letterSpacing:'0.02em'}}>
+                § {f}
+              </div>
+            ))}
+          </PxBox>
+        )}
+
+      </div>
+    </div>
+  );
+};
+
+// ── DEBUG LOG (draggable) ────────────────────────────────────
+const DebugOverlay=({logs,onClear})=>{
+  const [open,setOpen]=useState(false);
+  const [pos,setPos]=useState({x:window.innerWidth-424,y:10});
+  const listRef=useRef(null);
+  const panelRef=useRef(null);
+  const dragging=useRef(false);
+  const dragOffset=useRef({x:0,y:0});
+
+  useEffect(()=>{if(open&&listRef.current)listRef.current.scrollTop=listRef.current.scrollHeight;},[logs,open]);
+
+  const onMouseDown=useCallback(e=>{
+    if(e.target.closest('[data-no-drag]'))return;
+    dragging.current=true;
+    dragOffset.current={x:e.clientX-pos.x,y:e.clientY-pos.y};
+    e.preventDefault();
+    const move=ev=>{
+      if(!dragging.current)return;
+      const nx=ev.clientX-dragOffset.current.x;
+      const ny=ev.clientY-dragOffset.current.y;
+      const maxX=window.innerWidth-(panelRef.current?.offsetWidth||400);
+      const maxY=window.innerHeight-(panelRef.current?.offsetHeight||48);
+      setPos({x:Math.max(0,Math.min(maxX,nx)),y:Math.max(0,Math.min(maxY,ny))});
+    };
+    const up=()=>{dragging.current=false;window.removeEventListener('mousemove',move);window.removeEventListener('mouseup',up);};
+    window.addEventListener('mousemove',move);
+    window.addEventListener('mouseup',up);
+  },[pos]);
+
+  const errors=logs.filter(l=>l.level==='error').length;
+  return (
+    <div ref={panelRef} onMouseDown={onMouseDown}
+      style={{position:'fixed',left:pos.x,top:pos.y,zIndex:1000,
+        width:400,userSelect:'none',cursor:'grab',
+        filter:`drop-shadow(0 0 8px ${C.tealG})`}}>
+      {/* Header */}
+      <div style={{display:'flex',alignItems:'center',gap:7,
+        padding:'5px 12px',background:C.bgE,border:`1px solid ${open?C.teal:C.bdrX}`,
+        borderBottom:open?`1px solid ${C.bdrX}`:'none',
+        boxShadow:open?glow(C.teal,4):'none',transition:'border-color 200ms ease'}}>
+        <span style={{width:7,height:7,background:errors>0?C.rust:logs.length>0?C.teal:C.inkD,
+          flexShrink:0,display:'block',animation:errors>0?'pulse 1.4s ease-out infinite':'none'}}/>
+        <span style={{fontFamily:FF.mono,fontSize:10,color:C.inkS,letterSpacing:'0.12em',flex:1}}>DEBUG LOG</span>
+        <span style={{fontFamily:FF.mono,fontSize:9,color:C.inkM,padding:'1px 5px',
+          border:`1px solid ${C.bdrX}`,background:C.bgD}}>{logs.length}</span>
+        <span style={{fontFamily:FF.mono,fontSize:8,color:C.inkD,letterSpacing:'0.06em',padding:'0 4px'}}>⠿</span>
+        <button data-no-drag onClick={()=>setOpen(o=>!o)}
+          style={{background:'transparent',border:`1px solid ${C.bdrX}`,color:C.inkM,
+            fontFamily:FF.mono,fontSize:9,padding:'2px 6px',cursor:'pointer',lineHeight:1,
+            transition:'all 150ms ease'}}
+          onMouseEnter={e=>{e.target.style.borderColor=C.teal;e.target.style.color=C.tealB;}}
+          onMouseLeave={e=>{e.target.style.borderColor=C.bdrX;e.target.style.color=C.inkM;}}>
+          {open?'▲':'▼'}
+        </button>
+      </div>
+      {/* Body */}
+      {open&&(
+        <div data-no-drag style={{background:C.bgD,border:`1px solid ${C.teal}`,borderTop:0,
+          boxShadow:`0 16px 40px -8px rgba(0,0,0,0.9),0 0 20px ${C.tealG}`,overflow:'hidden',cursor:'default'}}>
+          <div style={{display:'flex',gap:6,padding:'6px 10px',borderBottom:`1px solid ${C.bdrX}`,background:C.bgE}}>
+            <button data-no-drag onClick={onClear} style={{background:'transparent',border:`1px solid ${C.bdrX}`,color:C.inkM,fontSize:10,padding:'2px 8px',fontFamily:FF.mono,cursor:'pointer',letterSpacing:'0.08em'}}>CLEAR</button>
+            <button data-no-drag onClick={()=>navigator.clipboard?.writeText(logs.map(l=>`[${l.t}][${l.level.toUpperCase()}][${l.src}] ${l.msg}`).join('\n'))}
+              style={{background:'transparent',border:`1px solid ${C.bdrX}`,color:C.inkM,fontSize:10,padding:'2px 8px',fontFamily:FF.mono,cursor:'pointer',letterSpacing:'0.08em'}}>COPY ALL</button>
+            <span style={{marginLeft:'auto',fontFamily:FF.mono,fontSize:9,color:C.inkD,alignSelf:'center'}}>// DEBUG CONSOLE</span>
+          </div>
+          <ul ref={listRef} style={{listStyle:'none',maxHeight:280,overflowY:'auto'}}>
+            {logs.length===0&&<li style={{padding:'12px 10px',color:C.inkD,fontFamily:FF.mono,fontSize:11,fontStyle:'italic'}}>// no logs yet</li>}
+            {logs.map(l=>(
+              <li key={l.id} style={{borderBottom:`1px solid ${C.bdrX}`,padding:'6px 10px'}}>
+                <div style={{display:'flex',gap:6,marginBottom:3,fontFamily:FF.mono,fontSize:9}}>
+                  <span style={{color:C.inkD}}>{l.t}</span>
+                  <span style={{color:{error:C.rust,warn:C.amber,info:C.teal,debug:C.blue}[l.level]||C.inkM,textShadow:textGlow({error:C.rust,warn:C.amber,info:C.teal,debug:C.blue}[l.level]||C.inkM)}}>{l.level.toUpperCase()}</span>
+                  <span style={{color:C.blueB}}>{l.src}</span>
+                </div>
+                <div style={{color:C.inkS,fontFamily:FF.mono,fontSize:11,whiteSpace:'pre-wrap',wordBreak:'break-word',lineHeight:1.6}}>{l.msg}</div>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ── TWEAKS PANEL (draggable basket) ──────────────────────────
+const TweaksPanel=({visible,tweaks,onTweak})=>{
+  const [pos,setPos]=useState({x:window.innerWidth-248,y:window.innerHeight-320});
+  const [open,setOpen]=useState(false);
+  const dragging=useRef(false);
+  const dragOffset=useRef({x:0,y:0});
+  const panelRef=useRef(null);
+
+  const onMouseDown=useCallback(e=>{
+    if(e.target.closest('[data-no-drag]'))return;
+    dragging.current=true;
+    dragOffset.current={x:e.clientX-pos.x,y:e.clientY-pos.y};
+    e.preventDefault();
+    const move=ev=>{
+      if(!dragging.current)return;
+      const nx=ev.clientX-dragOffset.current.x;
+      const ny=ev.clientY-dragOffset.current.y;
+      const maxX=window.innerWidth-(panelRef.current?.offsetWidth||240);
+      const maxY=window.innerHeight-(panelRef.current?.offsetHeight||48);
+      setPos({x:Math.max(0,Math.min(maxX,nx)),y:Math.max(0,Math.min(maxY,ny))});
+    };
+    const up=()=>{dragging.current=false;window.removeEventListener('mousemove',move);window.removeEventListener('mouseup',up);};
+    window.addEventListener('mousemove',move);
+    window.addEventListener('mouseup',up);
+  },[pos]);
+
+  if(!visible)return null;
+
+  return (
+    <div ref={panelRef} onMouseDown={onMouseDown}
+      style={{position:'fixed',left:pos.x,top:pos.y,zIndex:999,
+        width:220,userSelect:'none',cursor:'grab',
+        filter:`drop-shadow(0 0 10px ${C.tealG})`}}>
+
+      {/* Basket handle / header */}
+      <div style={{background:C.bgE,border:`1px solid ${C.teal}`,
+        borderBottom:open?`1px solid ${C.bdrX}`:'none',
+        padding:'7px 12px',display:'flex',alignItems:'center',gap:8,
+        boxShadow:`inset 0 1px 0 rgba(0,255,208,0.08)`}}>
+        {/* basket icon (pixel SVG) */}
+        <svg width="16" height="16" viewBox="0 0 16 16" style={{flexShrink:0}}>
+          <rect x="2" y="7" width="12" height="8" fill="none" stroke={C.teal} strokeWidth="1.5"/>
+          <path d="M1 7 L4 2 M15 7 L12 2" stroke={C.teal} strokeWidth="1.5" fill="none"/>
+          <line x1="8" y1="2" x2="8" y2="15" stroke={C.tealD} strokeWidth="1"/>
+          <line x1="2" y1="11" x2="14" y2="11" stroke={C.tealD} strokeWidth="1"/>
+        </svg>
+        <span style={{fontFamily:FF.mono,fontSize:9,color:C.teal,letterSpacing:'0.14em',flex:1,textShadow:textGlow(C.teal)}}>
+          TWEAKS
+        </span>
+        {/* drag indicator */}
+        <span style={{fontFamily:FF.mono,fontSize:8,color:C.inkD,letterSpacing:'0.06em'}}>⠿</span>
+        <button data-no-drag onClick={()=>setOpen(o=>!o)} style={{background:'transparent',border:`1px solid ${C.bdrX}`,
+          color:C.inkM,fontFamily:FF.mono,fontSize:9,padding:'2px 6px',cursor:'pointer',
+          transition:'all 150ms ease',lineHeight:1}}
+          onMouseEnter={e=>{e.target.style.borderColor=C.teal;e.target.style.color=C.tealB;}}
+          onMouseLeave={e=>{e.target.style.borderColor=C.bdrX;e.target.style.color=C.inkM;}}>
+          {open?'▲':'▼'}
+        </button>
+      </div>
+
+      {/* Basket body */}
+      {open&&(
+        <div data-no-drag style={{background:C.bgE,border:`1px solid ${C.teal}`,borderTop:0,
+          padding:'12px 14px',display:'flex',flexDirection:'column',gap:11,cursor:'default'}}>
+          {[['showLeftPanel','左侧状态栏'],['showRightPanel','右侧术语栏'],['scanlines','扫描线效果']].map(([k,label])=>(
+            <div key={k} style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+              <span style={{fontFamily:FF.mono,fontSize:11,color:C.inkS}}>{label}</span>
+              <button onClick={()=>onTweak(k,!tweaks[k])} style={{fontFamily:FF.mono,fontSize:10,
+                padding:'3px 10px',border:`1px solid ${tweaks[k]?C.teal:C.bdrX}`,
+                background:tweaks[k]?C.tealV:'transparent',color:tweaks[k]?C.tealB:C.inkD,
+                cursor:'pointer',letterSpacing:'0.08em',textShadow:tweaks[k]?textGlow(C.teal):'none',
+                transition:'all 150ms ease'}}>
+                {tweaks[k]?'[ON]':'[OFF]'}
+              </button>
+            </div>
+          ))}
+          <div style={{borderTop:`1px solid ${C.bdrX}`,paddingTop:10}}>
+            <PxLabel color={C.inkD} style={{display:'block',marginBottom:8}}>ACCENT COLOR</PxLabel>
+            <div style={{display:'flex',gap:8}}>
+              {[['teal','#00E5B0'],['blue','#0099EE'],['plum','#9966FF']].map(([k,col])=>(
+                <button key={k} onClick={()=>onTweak('theme',k)} style={{width:22,height:22,background:col,
+                  border:`2px solid ${tweaks.theme===k?C.ink:C.bdrX}`,cursor:'pointer',
+                  boxShadow:tweaks.theme===k?glow(col,8):'none',transition:'all 150ms ease'}}/>
+              ))}
+            </div>
+          </div>
+          {/* pixel basket weave decoration */}
+          <div style={{borderTop:`1px solid ${C.bdrX}`,paddingTop:8,fontFamily:FF.mono,fontSize:8,
+            color:C.inkF,letterSpacing:'0.06em',textAlign:'center',lineHeight:1.8,userSelect:'none'}}>
+            {'▓░▓░▓░▓░▓░▓░▓░▓░▓'}<br/>
+            {'░▓░▓░▓░▓░▓░▓░▓░▓░'}
+          </div>
+          {/* green bottom edge */}
+          <div style={{height:3,background:`linear-gradient(90deg,transparent,${C.ivy},${C.teal},${C.ivy},transparent)`,boxShadow:`0 0 8px ${C.ivy},0 0 2px ${C.ivy}`,marginTop:10}}/>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ── DRAG DIVIDER ─────────────────────────────────────────────
+const Divider=({onDrag})=>{
+  const dragging=useRef(false);
+  const onMouseDown=useCallback(e=>{
+    dragging.current=true;e.preventDefault();
+    const move=ev=>{if(dragging.current)onDrag(ev.movementX);};
+    const up=()=>{dragging.current=false;window.removeEventListener('mousemove',move);window.removeEventListener('mouseup',up);};
+    window.addEventListener('mousemove',move);window.addEventListener('mouseup',up);
+  },[onDrag]);
+  return (
+    <div onMouseDown={onMouseDown} style={{width:5,cursor:'col-resize',background:'transparent',flexShrink:0,position:'relative',zIndex:10,transition:'background 200ms ease'}}
+      onMouseEnter={e=>e.currentTarget.style.background=C.tealV}
+      onMouseLeave={e=>e.currentTarget.style.background='transparent'}>
+      <div style={{position:'absolute',top:0,bottom:0,left:'50%',width:1,
+        background:`repeating-linear-gradient(180deg,${C.bdrX} 0px,${C.bdrX} 4px,transparent 4px,transparent 8px)`}}/>
+    </div>
+  );
+};
+
+// ── CHAT HEADER ──────────────────────────────────────────────
+const ChatHeader=({repo,onReset})=>(
+  <div style={{padding:'10px 32px',borderBottom:`1px solid ${C.bdrX}`,display:'flex',alignItems:'center',gap:16,background:C.bgP,flexShrink:0}}>
+    <div style={{flex:1,minWidth:0}}>
+      <PxLabel style={{display:'block',marginBottom:4}}>REPO TUTOR // CHATTING</PxLabel>
+      <div style={{fontFamily:FF.mono,fontSize:13,color:C.tealB,wordBreak:'break-all',letterSpacing:'0.04em',textShadow:textGlow(C.teal)}}>{repo}</div>
+    </div>
+    <button onClick={onReset} style={{background:'transparent',border:`1px solid ${C.bdrX}`,color:C.inkM,
+      padding:'6px 14px',fontFamily:FF.mono,fontSize:10,cursor:'pointer',letterSpacing:'0.1em',
+      flexShrink:0,transition:'all 150ms ease'}}
+      onMouseEnter={e=>{e.target.style.borderColor=C.teal;e.target.style.color=C.tealB;}}
+      onMouseLeave={e=>{e.target.style.borderColor=C.bdrX;e.target.style.color=C.inkM;}}>
+      [SWITCH REPO]
+    </button>
+  </div>
+);
+
+// ── APP ──────────────────────────────────────────────────────
+function App(){
+  const [tweaks,setTweaks]=useState({...TWEAK_DEFAULTS});
+  const [tweaksVisible,setTweaksVisible]=useState(false);
+  const [view,setView]=useState('input');
+  const [repoInput,setRepoInput]=useState('');
+  const [steps,setSteps]=useState(STEPS.map(s=>({...s,st:'pending'})));
+  const [messages,setMessages]=useState([]);
+  const [status,setStatus]=useState('idle');
+  const [subStatus,setSubStatus]=useState(null);
+  const [inputDisabled,setInputDisabled]=useState(false);
+  const [streaming,setStreaming]=useState(false);
+  const [analysisStream,setAnalysisStream]=useState('');
+  const [logs,setLogs]=useState([mkLog('info','system','REPO TUTOR INITIALIZED'),mkLog('debug','session','status: idle')]);
+  const [leftW,setLeftW]=useState(256);
+  const [rightW,setRightW]=useState(264);
+
+  const addLog=useCallback((level,src,msg)=>setLogs(l=>[...l,mkLog(level,src,msg)]),[]);
+
+  useEffect(()=>{
+    const listener=e=>{
+      if(e.data?.type==='__activate_edit_mode')setTweaksVisible(true);
+      if(e.data?.type==='__deactivate_edit_mode')setTweaksVisible(false);
+    };
+    window.addEventListener('message',listener);
+    window.parent.postMessage({type:'__edit_mode_available'},'*');
+    return()=>window.removeEventListener('message',listener);
+  },[]);
+
+  const onTweak=(k,v)=>{setTweaks(t=>({...t,[k]:v}));window.parent.postMessage({type:'__edit_mode_set_keys',edits:{[k]:v}},'*');};
+
+  const runAnalysis=useCallback(async()=>{
+    addLog('info','api','POST /api/repo → 202 Accepted');
+    addLog('debug','sse',`CONNECT /api/analysis/stream`);
+    setStatus('accessing');
+    for(let i=0;i<STEPS.length;i++){
+      setSteps(s=>s.map((st,idx)=>idx===i?{...st,st:'running'}:st));
+      addLog('info','sse',`analysis_progress: ${STEPS[i].key} → RUNNING`);
+      await new Promise(r=>setTimeout(r,i===5?700:750));
+      if(i===0){setStatus('analyzing');addLog('info','session','status: idle → analyzing');}
+      setSteps(s=>s.map((st,idx)=>idx===i?{...st,st:'done'}:st));
+      addLog('info','sse',`analysis_progress: ${STEPS[i].key} → DONE`);
+      if(i===4){
+        setAnalysisStream('> REPO OVERVIEW\n\nPython source-code teaching agent...');
+        await new Promise(r=>setTimeout(r,300));
+        setAnalysisStream(s=>s+'\n\n> Assembling teaching skeleton...\n> Identifying entry candidates...');
+      }
+    }
+    addLog('info','sse','message_completed: initial_report');
+    addLog('info','session','status: analyzing → chatting / waiting_user');
+    setStatus('chatting');setSubStatus('waiting_user');
+    const now=new Date().toLocaleTimeString('zh',{hour:'2-digit',minute:'2-digit'});
+    setMessages([{id:'msg_init',role:'agent',type:'initial_report',content:INIT_REPORT,suggestions:['启动流程是怎么走的？','核心模块各自负责什么？','深入 m5_session 模块'],time:now,streaming:false}]);
+    setView('chatting');setInputDisabled(false);setAnalysisStream('');
+  },[addLog]);
+
+  const onSubmit=useCallback(e=>{
+    e.preventDefault();
+    if(!repoInput.trim())return;
+    addLog('info','ui','SUBMIT: '+repoInput);
+    setView('analyzing');setStatus('accessing');setInputDisabled(true);
+    setSteps(STEPS.map(s=>({...s,st:'pending'})));
+    runAnalysis();
+  },[repoInput,runAnalysis,addLog]);
+
+  const onSend=useCallback(async(text)=>{
+    if(inputDisabled)return;
+    const now=new Date().toLocaleTimeString('zh',{hour:'2-digit',minute:'2-digit'});
+    addLog('info','api','POST /api/chat → 202 Accepted');
+    addLog('debug','sse','CONNECT /api/chat/stream');
+    setMessages(m=>[...m,{id:`u_${Date.now()}`,role:'user',content:text,time:now}]);
+    setInputDisabled(true);setSubStatus('agent_thinking');setStreaming(true);
+    await new Promise(r=>setTimeout(r,1100));
+    setSubStatus('agent_streaming');setStreaming(false);
+    const agentId=`a_${Date.now()}`;
+    setMessages(m=>[...m,{id:agentId,role:'agent',content:'',time:now,streaming:true}]);
+    for(let i=0;i<ANSWER_TEXT.length;i+=10){
+      await new Promise(r=>setTimeout(r,16));
+      setMessages(m=>m.map(msg=>msg.id===agentId?{...msg,content:ANSWER_TEXT.slice(0,i+10)}:msg));
+    }
+    setMessages(m=>m.map(msg=>msg.id===agentId?{...msg,content:ANSWER_TEXT,streaming:false,
+      suggestions:['分析工作流内部分流？','SSE 推送机制深入？','routes 错误处理？']}:msg));
+    addLog('info','sse','message_completed: agent_answer');
+    setSubStatus('waiting_user');setInputDisabled(false);
+  },[inputDisabled,addLog]);
+
+  const teachState=view==='chatting'?{goal:'overview · structure',depth:'默认',covered:['overview','entry']}:null;
+
+  return (
+    <div style={{width:'100vw',height:'100vh',display:'flex',flexDirection:'column',overflow:'hidden',
+      background:C.bg,position:'relative'}}>
+
+      {/* Scanlines toggle via tweaks */}
+      {tweaks.scanlines&&<div style={{position:'fixed',inset:0,zIndex:9998,pointerEvents:'none',
+        background:'repeating-linear-gradient(0deg,rgba(0,0,0,0.15) 0px,rgba(0,0,0,0.15) 1px,transparent 1px,transparent 3px)'}}/>}
+
+      <div style={{flex:1,display:'flex',minHeight:0,position:'relative'}}>
+
+        {/* LEFT */}
+        {tweaks.showLeftPanel&&<>
+          <div style={{width:leftW,minWidth:160,maxWidth:400,flexShrink:0}}>
+            <LeftPanel view={view} steps={steps} repo={view!=='input'?repoInput:null} status={status} subStatus={subStatus} teachState={teachState} msgCount={messages.length}/>
+          </div>
+          <Divider onDrag={dx=>setLeftW(w=>Math.max(160,Math.min(400,w+dx)))}/>
+        </>}
+
+        {/* CENTER */}
+        <div style={{flex:1,display:'flex',flexDirection:'column',minWidth:0,background:C.bg,overflow:'hidden'}}>
+          {view==='chatting'&&<ChatHeader repo={repoInput} onReset={()=>{setView('input');setStatus('idle');setSubStatus(null);setMessages([]);setSteps(STEPS.map(s=>({...s,st:'pending'})));setInputDisabled(false);addLog('info','session','DELETE /api/session → idle');}}/>}
+          <div style={{flex:1,display:'flex',minHeight:0}}>
+            <CenterPanel view={view} steps={steps} repoInput={repoInput} setRepoInput={setRepoInput} onSubmit={onSubmit} onSend={onSend} messages={messages} inputDisabled={inputDisabled} streaming={streaming} analysisStream={analysisStream}/>
+          </div>
+        </div>
+
+        {/* RIGHT */}
+        {tweaks.showRightPanel&&<>
+          <Divider onDrag={dx=>setRightW(w=>Math.max(180,Math.min(420,w-dx)))}/>
+          <div style={{width:rightW,minWidth:180,maxWidth:420,flexShrink:0}}>
+            <RightPanel view={view} messages={messages}/>
+          </div>
+        </>}
+
+      </div>
+
+      <DebugOverlay logs={logs} onClear={()=>setLogs([])}/>
+      <TweaksPanel visible={tweaksVisible} tweaks={tweaks} onTweak={onTweak}/>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+<template id="__bundler_thumbnail">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 80">
+  <rect width="120" height="80" fill="#020A12"/>
+  <rect x="8" y="8" width="26" height="64" fill="#051828" stroke="#0D5070" stroke-width="1"/>
+  <rect x="38" y="8" width="44" height="64" fill="#030E1A" stroke="#0A3250" stroke-width="1"/>
+  <rect x="86" y="8" width="26" height="64" fill="#051828" stroke="#0D5070" stroke-width="1"/>
+  <rect x="12" y="12" width="18" height="4" fill="#00E5B0" opacity="0.8"/>
+  <rect x="12" y="20" width="18" height="2" fill="#0A5070"/>
+  <rect x="12" y="25" width="14" height="2" fill="#0A5070"/>
+  <rect x="12" y="30" width="16" height="2" fill="#00E5B0" opacity="0.4"/>
+  <rect x="12" y="35" width="18" height="2" fill="#0A5070"/>
+  <rect x="42" y="14" width="36" height="18" fill="#071F34" stroke="#00E5B0" stroke-width="1"/>
+  <rect x="44" y="17" width="20" height="2" fill="#00E5B0" opacity="0.6"/>
+  <rect x="44" y="22" width="30" height="1" fill="#408A72"/>
+  <rect x="44" y="25" width="26" height="1" fill="#408A72"/>
+  <rect x="42" y="36" width="36" height="14" fill="#051828" stroke="#0D5070" stroke-width="1"/>
+  <rect x="44" y="39" width="28" height="1" fill="#408A72"/>
+  <rect x="44" y="43" width="20" height="1" fill="#408A72"/>
+  <rect x="90" y="12" width="18" height="12" fill="#071F34" stroke="#00E5B0" stroke-width="1"/>
+  <rect x="90" y="28" width="18" height="2" fill="#0A5070"/>
+  <rect x="90" y="33" width="14" height="2" fill="#0A5070"/>
+  <!-- scanlines -->
+  <rect x="0" y="0" width="120" height="80" fill="url(#sc)" opacity="0.3"/>
+  <defs><pattern id="sc" width="1" height="3" patternUnits="userSpaceOnUse"><rect width="1" height="1" fill="#000" y="2"/></pattern></defs>
+</svg>
+</template>
+</body>
+</html>

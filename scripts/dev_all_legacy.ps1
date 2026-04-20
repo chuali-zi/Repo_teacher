@@ -1,5 +1,5 @@
-# Repo Tutor - start backend + default frontend
-# Usage: .\scripts\dev_all.ps1
+# Repo Tutor - start backend + legacy frontend
+# Usage: .\scripts\dev_all_legacy.ps1
 
 $ErrorActionPreference = 'Stop'
 
@@ -8,11 +8,11 @@ if (-not $PSScriptRoot) {
     $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 }
 
-$WebDir  = Join-Path $Root 'web_v2'
+$WebDir  = Join-Path $Root 'web'
 $IndexFile = Join-Path $WebDir 'index.html'
 
 if (-not (Test-Path $IndexFile)) {
-    Write-Host '[ERROR] web_v2\index.html not found' -ForegroundColor Red
+    Write-Host '[ERROR] web\index.html not found' -ForegroundColor Red
     Write-Host "Checked: $IndexFile"
     Read-Host 'Press Enter to exit'
     exit 1
@@ -20,7 +20,7 @@ if (-not (Test-Path $IndexFile)) {
 
 Write-Host ''
 Write-Host '  =============================================' -ForegroundColor DarkYellow
-Write-Host '    Repo Tutor - Pixel Frontend' -ForegroundColor Yellow
+Write-Host '    Repo Tutor - Legacy Frontend' -ForegroundColor Yellow
 Write-Host "    Backend:  http://localhost:8000" -ForegroundColor Cyan
 Write-Host "    Frontend: http://localhost:5180" -ForegroundColor Cyan
 Write-Host '  =============================================' -ForegroundColor DarkYellow

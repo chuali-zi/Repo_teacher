@@ -4,8 +4,8 @@ Repo Tutor is a read-only repository teaching agent. The current runtime is deli
 
 ## Current Runtime
 
-- Active stack: `backend/` + `web/`
-- `web/` is the live frontend. `frontend/` is a legacy React/Vite prototype.
+- Active stack: `backend/` + `web_v2/`
+- `web_v2/` is the default live frontend. `web/` is a legacy static fallback, and `frontend/` is the older React/Vite prototype.
 - Agent messages render from `MessageDto.raw_text`. The frontend does not synthesize visible prose from `structured_content` or `initial_report_content`.
 - `structured_content` and `initial_report_content` still exist in the backend/SSE contracts for teaching state, suggestions, and compatibility.
 - Chat turns allow up to `50` tool rounds by default. Set `REPO_TUTOR_MAX_TOOL_ROUNDS` to override it.
@@ -143,7 +143,7 @@ scripts\dev_backend.cmd
 ### 5. Run the live frontend
 
 ```bash
-cd web
+cd web_v2
 python -m http.server 5180 --bind 127.0.0.1
 ```
 
@@ -152,6 +152,13 @@ Or:
 ```bash
 scripts\dev_web.cmd
 scripts\dev_all.cmd
+```
+
+Legacy static frontend:
+
+```bash
+scripts\dev_web_legacy.cmd
+scripts\dev_all_legacy.cmd
 ```
 
 ### 6. Use it
@@ -196,7 +203,8 @@ npm run build
 
 ## Notes For Maintainers
 
-- Prefer `web/` over `frontend/` unless you are explicitly asked to work on the legacy React prototype.
+- Prefer `web_v2/` for current frontend work.
+- Use `web/` only when you need the legacy static frontend, and `frontend/` only for the older React prototype.
 - The backend should provide navigation help, not static teaching conclusions.
 - Claims about entry points, flow, layering, or dependency sources must be backed by source-tool evidence or explicitly marked as uncertain.
 - Some older design docs may still mention `m3` / `m4`. Treat the current code and this README as the source of truth for the live runtime.
