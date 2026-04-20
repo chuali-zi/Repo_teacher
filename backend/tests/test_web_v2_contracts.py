@@ -35,3 +35,21 @@ def test_default_and_legacy_scripts_point_to_expected_frontends() -> None:
     assert "'web_v2'" in default_web
     assert "'web'" in legacy_all
     assert "'web'" in legacy_web
+
+
+def test_startup_scripts_guard_against_port_conflicts() -> None:
+    default_all = (ROOT / "scripts" / "dev_all.ps1").read_text(encoding="utf-8")
+    default_web = (ROOT / "scripts" / "dev_web.ps1").read_text(encoding="utf-8")
+    legacy_all = (ROOT / "scripts" / "dev_all_legacy.ps1").read_text(encoding="utf-8")
+    legacy_web = (ROOT / "scripts" / "dev_web_legacy.ps1").read_text(encoding="utf-8")
+
+    assert "Get-NetTCPConnection" in default_all
+    assert "Get-NetTCPConnection" in default_web
+    assert "Get-NetTCPConnection" in legacy_all
+    assert "Get-NetTCPConnection" in legacy_web
+    assert "Assert-PortFree -Port 5180" in default_all
+    assert "Assert-PortFree -Port 5180" in default_web
+    assert "Assert-PortFree -Port 5180" in legacy_all
+    assert "Assert-PortFree -Port 5180" in legacy_web
+    assert "Assert-PortFree -Port 8000" in default_all
+    assert "Assert-PortFree -Port 8000" in legacy_all
