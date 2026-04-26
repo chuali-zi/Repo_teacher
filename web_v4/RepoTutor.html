@@ -1,0 +1,1292 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RepoTutor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{width:100%;height:100%;overflow:hidden}
+  body{
+    background:#1e1e2e;
+    font-family:'JetBrains Mono','Fira Code','Courier New',monospace;
+    font-size:12px;
+    color:#cdd6f4;
+  }
+  ::-webkit-scrollbar{width:3px;height:3px}
+  ::-webkit-scrollbar-track{background:#11111b}
+  ::-webkit-scrollbar-thumb{background:#45475a}
+  ::-webkit-scrollbar-thumb:hover{background:#585b70}
+  @keyframes blink{0%,100%{opacity:1}50%{opacity:0}}
+  @keyframes scanIn{from{opacity:0;transform:translateX(-4px)}to{opacity:1;transform:translateX(0)}}
+  @keyframes pulse{0%,100%{box-shadow:0 0 4px currentColor}50%{box-shadow:0 0 10px currentColor}}
+  @keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-3px)}}
+  @keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
+  .cursor{display:inline-block;width:7px;height:13px;background:#89dceb;animation:blink 1s step-end infinite;vertical-align:text-bottom;margin-left:1px}
+  .scan-in{animation:scanIn 0.2s ease-out both}
+  input,button,textarea{font-family:'JetBrains Mono','Courier New',monospace}
+  input:focus{outline:none}
+  button:focus{outline:none}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useRef, useCallback, useMemo } = React;
+
+// ── COLOR TOKENS (Catppuccin Mocha) ──────────────────────────────────
+const C = {
+  bg:      '#1e1e2e', surface: '#181825', surface2: '#11111b',
+  overlay: '#313244', muted:   '#45475a', subtle:   '#585b70',
+  text:    '#cdd6f4', sub1:    '#bac2de', sub0:     '#a6adc8',
+  comment: '#6c7086',
+  cyan:    '#89dceb', green:   '#a6e3a1', yellow:   '#f9e2af',
+  red:     '#f38ba8', mauve:   '#cba6f7', blue:     '#89b4fa',
+  teal:    '#94e2d5', peach:   '#fab387', pink:     '#f5c2e7',
+};
+
+// ── AGENT STATE CONFIG ────────────────────────────────────────────────
+const AGENT_STATES = {
+  idle:        { label: '待机中',   color: C.comment, petMsg: '发呆中',    petMood: 'idle'   },
+  thinking:    { label: '思考中',   color: C.yellow,  petMsg: '努力思考中', petMood: 'think'  },
+  acting:      { label: '行动中',   color: C.cyan,    petMsg: '捣蛋中',    petMood: 'act'    },
+  scanning:    { label: '扫描代码', color: C.blue,    petMsg: '翻找文件中', petMood: 'scan'   },
+  teaching:    { label: '教学中',   color: C.green,   petMsg: '胡闹中',    petMood: 'teach'  },
+  researching: { label: '深度研究', color: C.mauve,   petMsg: '钻研中',    petMood: 'research'},
+};
+
+// ── ASCII PET FRAMES per mood ─────────────────────────────────────────
+const PET = {
+  idle: [
+`  /\\_/\\  
+ ( -w- ) 
+  > ▫ <  
+ (~~~~~)`,
+`  /\\_/\\  
+ ( -.- ) 
+  > ▫ <  
+ (~~~~~)`
+  ],
+  think: [
+`  /\\_/\\ ？
+ ( o.? ) 
+  > ~ <  
+ (~~~~~)`,
+`  /\\_/\\ ？？
+ ( ?.o ) 
+  > ~ <  
+ (~~~~~)`
+  ],
+  act: [
+`  /\\_/\\  
+ ( >.< ) 
+  >⌨  <  
+ (~~~~~)`,
+`  /\\_/\\  
+ ( ^.^ ) 
+  >⌨  <  
+ (~~~~~)`
+  ],
+  scan: [
+`  /\\_/\\  
+ ( ◉.◉)🔍
+  > ↗ <  
+ (~~~~~)`,
+`  /\\_/\\ 🔍
+ (◉. ◉) 
+  > ↙ <  
+ (~~~~~)`
+  ],
+  teach: [
+`  /\\_/\\  
+ ( *.* ) 
+  >📖 <  
+ (~~~~~)`,
+`  /\\_/\\  
+ ( ^w^ ) 
+  >📖 <  
+ (~~~~~)`
+  ],
+  research: [
+`  /\\_/\\  
+ ( >.>) 
+  >🔬 <  
+ (~~~~~)`,
+`  /\\_/\\  
+ ( <.< ) 
+  >🔬 <  
+ (~~~~~)`
+  ],
+};
+
+// ── API / STREAM CONTRACT ADAPTER ─────────────────────────────────────
+const API_BASE = (
+  window.REPOTUTOR_API_BASE ||
+  document.querySelector('meta[name="repo-tutor-api-base"]')?.content ||
+  'http://127.0.0.1:8000'
+).replace(/\/$/, '');
+
+const STREAM_EVENTS = [
+  'agent_status',
+  'repo_parse_log',
+  'repo_connected',
+  'teaching_code',
+  'answer_stream_start',
+  'answer_stream_delta',
+  'answer_stream_end',
+  'message_completed',
+  'deep_research_progress',
+  'run_cancelled',
+  'error',
+  // Transitional compatibility with the existing backend stream.
+  'status_changed',
+  'analysis_progress',
+  'degradation_notice',
+  'agent_activity',
+];
+
+const buildUrl = (path) => /^https?:\/\//.test(path) ? path : `${API_BASE}${path}`;
+
+const normalizeGithubInput = (value) => {
+  const trimmed = value.trim();
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  if (/^github\.com\//i.test(trimmed)) return `https://${trimmed}`;
+  return `https://github.com/${trimmed.replace(/^\/+/, '')}`;
+};
+
+const unwrapData = (payload) => payload?.data ?? payload;
+
+const makeUiMessage = (message, fallbackRole = 'assistant') => ({
+  id: message?.message_id || message?.id || `${Date.now()}_${Math.random().toString(16).slice(2)}`,
+  role: message?.role === 'agent' ? 'assistant' : (message?.role || fallbackRole),
+  content: message?.content || message?.raw_text || message?.answer || '',
+  color: message?.color,
+});
+
+const mapAgentState = (payload) => {
+  const direct = payload?.state || payload?.status?.state;
+  if (direct && AGENT_STATES[direct]) return direct;
+
+  const phase = payload?.phase || payload?.activity?.phase || payload?.sub_status || payload?.status;
+  if (!phase) return 'idle';
+  if (['resolving_github', 'cloning_repo', 'scanning_tree', 'accessing', 'analyzing'].includes(phase)) return 'scanning';
+  if (['thinking', 'planning', 'agent_thinking'].includes(phase)) return 'thinking';
+  if (['planning_tool_call', 'tool_running', 'tool_succeeded', 'reading_code'].includes(phase)) return 'acting';
+  if (['researching', 'deep_research'].includes(phase)) return 'researching';
+  if (['teaching', 'streaming', 'agent_streaming', 'idle_after_teach', 'chatting'].includes(phase)) return 'teaching';
+  if (['failed', 'error'].includes(phase)) return 'idle';
+  return 'idle';
+};
+
+const colorForEvent = (name, payload) => {
+  const level = payload?.log?.level || payload?.level;
+  const state = payload?.log?.stage || payload?.step_state;
+  if (name === 'error' || level === 'error' || state === 'error') return C.red;
+  if (level === 'warn' || name === 'degradation_notice') return C.peach;
+  if (name === 'repo_connected' || state === 'done' || state === 'completed') return C.green;
+  if (name === 'deep_research_progress') return C.mauve;
+  if (name === 'agent_activity' || name === 'agent_status') return C.blue;
+  return C.yellow;
+};
+
+const logTextFromEvent = (name, payload) => {
+  if (payload?.log?.text) return payload.log.text;
+  if (payload?.user_notice) return payload.user_notice;
+  if (payload?.activity?.summary) return payload.activity.summary;
+  if (payload?.status?.current_action) return payload.status.current_action;
+  if (payload?.summary) return payload.summary;
+  if (payload?.error?.message) return payload.error.message;
+  if (payload?.degradation?.user_notice) return payload.degradation.user_notice;
+  if (payload?.step_key) return `${payload.step_key}: ${payload.step_state}`;
+  return name;
+};
+
+const snippetFromPayload = (payload) => {
+  const source = payload?.snippet || payload?.current_code || payload?.code_snippet;
+  if (!source) return null;
+  return {
+    id: source.snippet_id || source.id || `${Date.now()}_code`,
+    path: source.path || source.relative_path || 'unknown',
+    language: source.language || '',
+    startLine: source.start_line || source.startLine || 1,
+    endLine: source.end_line || source.endLine || 1,
+    title: source.title || '教学片段',
+    reason: source.reason || '',
+    code: source.code || source.content || '',
+  };
+};
+
+const RepoTutorApi = (() => {
+  async function request({ method, path, body, sessionId }) {
+    const headers = { Accept: 'application/json' };
+    if (body !== undefined) headers['Content-Type'] = 'application/json';
+    if (sessionId) headers['X-Session-Id'] = sessionId;
+
+    const resp = await fetch(buildUrl(path), {
+      method,
+      headers,
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+      mode: 'cors',
+    });
+
+    let payload = null;
+    try {
+      payload = await resp.json();
+    } catch (_) {
+      // Non-JSON errors are normalized below.
+    }
+
+    if (!resp.ok || payload?.ok === false) {
+      const failure = payload?.error || {
+        error_code: 'http_error',
+        message: `HTTP ${resp.status}`,
+        retryable: resp.status >= 500,
+        stage: 'idle',
+        input_preserved: true,
+      };
+      const err = new Error(failure.message);
+      err.status = resp.status;
+      err.payload = failure;
+      throw err;
+    }
+    return payload || { ok: true, session_id: sessionId || null, data: null };
+  }
+
+  async function requestWithFallback(primary, fallback) {
+    try {
+      return await request(primary);
+    } catch (err) {
+      if (fallback && (err.status === 404 || err.status === 405)) {
+        return request(fallback);
+      }
+      throw err;
+    }
+  }
+
+  function openStream(streamUrl, onEvent, onClose) {
+    const source = new EventSource(buildUrl(streamUrl));
+    const handlers = STREAM_EVENTS.map((name) => {
+      const handler = (ev) => {
+        if (!ev.data) return;
+        try {
+          onEvent(name, JSON.parse(ev.data));
+        } catch (_) {
+          onEvent(name, { event_type: name, raw: ev.data });
+        }
+      };
+      source.addEventListener(name, handler);
+      return [name, handler];
+    });
+
+    source.onmessage = (ev) => {
+      if (!ev.data) return;
+      try {
+        const payload = JSON.parse(ev.data);
+        onEvent(payload.event_type || 'message', payload);
+      } catch (_) {
+        onEvent('message', { raw: ev.data });
+      }
+    };
+    source.onerror = () => onClose && onClose(source.readyState);
+
+    return () => {
+      handlers.forEach(([name, handler]) => source.removeEventListener(name, handler));
+      source.close();
+    };
+  }
+
+  return {
+    createRepoSession(inputValue, mode) {
+      const normalized = normalizeGithubInput(inputValue);
+      return requestWithFallback(
+        {
+          method: 'POST',
+          path: '/api/v4/repositories',
+          body: { input_value: normalized, branch: null, mode },
+        },
+        {
+          method: 'POST',
+          path: '/api/repo',
+          body: { input_value: normalized, analysis_mode: mode === 'deep' ? 'deep_research' : 'quick_guide' },
+        }
+      );
+    },
+    getAgentStatus(sessionId) {
+      return request({ method: 'GET', path: `/api/v4/agent/status?session_id=${encodeURIComponent(sessionId)}` });
+    },
+    sendMessage(sessionId, message, mode) {
+      return requestWithFallback(
+        {
+          method: 'POST',
+          path: '/api/v4/chat/messages',
+          sessionId,
+          body: { message, mode, client_message_id: `client_${Date.now()}` },
+        },
+        {
+          method: 'POST',
+          path: '/api/chat',
+          sessionId,
+          body: { message },
+        }
+      );
+    },
+    explainTerm(sessionId, term, context = {}) {
+      return requestWithFallback(
+        {
+          method: 'POST',
+          path: '/api/v4/sidecar/explain',
+          body: { term, session_id: sessionId || null, context },
+        },
+        {
+          method: 'POST',
+          path: '/api/sidecar/explain',
+          body: { question: term },
+        }
+      );
+    },
+    cancel(sessionId) {
+      return request({ method: 'POST', path: '/api/v4/control/cancel', sessionId, body: { reason: 'user_escape' } });
+    },
+    openStream,
+  };
+})();
+
+// ── INITIAL MESSAGES ──────────────────────────────────────────────────
+const INIT_MSGS = [
+  { id: 0, role: 'system',
+    content: '◆ RepoTutor v0.1 · TUI Mode 已就绪',
+    color: C.cyan },
+  { id: 1, role: 'system',
+    content: '请在顶部输入 GitHub 仓库地址，然后点击「解析」开始学习。',
+    color: C.comment },
+];
+
+// ── SMALL COMPONENTS ─────────────────────────────────────────────────
+function Cursor() {
+  return <span className="cursor" />;
+}
+
+function Dot({ color, pulse }) {
+  return (
+    <span style={{
+      display: 'inline-block', width: 7, height: 7,
+      background: color,
+      boxShadow: `0 0 5px ${color}`,
+      animation: pulse ? `pulse 1.4s ease-in-out infinite` : 'none',
+      flexShrink: 0,
+    }} />
+  );
+}
+
+function PanelHeader({ icon, label, color = C.cyan, right }) {
+  return (
+    <div style={{
+      padding: '5px 10px',
+      borderBottom: `1px solid ${C.overlay}`,
+      background: C.surface,
+      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+      flexShrink: 0,
+    }}>
+      <span style={{ color, fontSize: '10px', fontWeight: 700, letterSpacing: '0.1em' }}>
+        {icon} {label}
+      </span>
+      {right && <span style={{ color: C.comment, fontSize: '10px' }}>{right}</span>}
+    </div>
+  );
+}
+
+// ── GLOSSARY PANEL ────────────────────────────────────────────────────
+function GlossaryPanel({ sessionId }) {
+  const [input, setInput] = useState('');
+  const [result, setResult] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [history, setHistory] = useState([
+    { term: 'Virtual DOM', zh: '虚拟 DOM' },
+    { term: 'Reconciler',  zh: '调和器'   },
+    { term: 'Fiber',       zh: '渲染单元' },
+    { term: 'Hook',        zh: '状态钩子' },
+    { term: 'Closure',     zh: '闭包'     },
+  ]);
+
+  const explain = async (term) => {
+    if (!term.trim()) return;
+    setLoading(true); setResult(null);
+    try {
+      const payload = await RepoTutorApi.explainTerm(sessionId, term.trim());
+      const data = unwrapData(payload);
+      const explainedTerm = data?.term || term.trim();
+      const text = data?.explanation || data?.answer || '没有返回解释内容。';
+      setResult({ term: explainedTerm, text });
+      setHistory(p => [
+        { term: explainedTerm, zh: data?.short_label || '已解释' },
+        ...p.filter(x => x.term !== explainedTerm).slice(0, 6),
+      ]);
+    } catch (err) {
+      setResult({ term, text: err?.payload?.message || '解释服务暂时不可用，请稍后重试。' });
+    }
+    setLoading(false);
+  };
+
+  return (
+    <div style={{
+      width: '100%', height: '100%',
+      display: 'flex', flexDirection: 'column',
+      background: C.surface2,
+      borderRight: `1px solid ${C.overlay}`,
+    }}>
+      <PanelHeader icon="◈" label="术语解释器" color={C.mauve} />
+
+      {/* Input */}
+      <div style={{ padding: '7px 8px', borderBottom: `1px solid ${C.overlay}`, flexShrink: 0 }}>
+        <div style={{ display: 'flex', gap: 4 }}>
+          <input
+            value={input}
+            onChange={e => setInput(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') { explain(input); setInput(''); } }}
+            placeholder="输入术语..."
+            style={{
+              flex: 1, background: C.overlay,
+              border: `1px solid ${C.muted}`, color: C.text,
+              padding: '4px 6px', fontSize: '11px', minWidth: 0,
+            }}
+          />
+          <button onClick={() => { explain(input); setInput(''); }} style={{
+            background: C.mauve, color: C.surface2,
+            border: 'none', padding: '4px 7px',
+            fontSize: '11px', cursor: 'pointer', fontWeight: 700,
+          }}>►</button>
+        </div>
+      </div>
+
+      {/* Result */}
+      {(loading || result) && (
+        <div style={{
+          padding: '8px', borderBottom: `1px solid ${C.overlay}`,
+          background: C.surface, flexShrink: 0,
+        }}>
+          {loading ? (
+            <div style={{ color: C.yellow, fontSize: '11px' }}>◆ 查询中<Cursor /></div>
+          ) : result && (
+            <>
+              <div style={{ color: C.mauve, fontSize: '11px', marginBottom: 4 }}>[ {result.term} ]</div>
+              <div style={{ color: C.sub1, fontSize: '11px', lineHeight: 1.6 }}>{result.text}</div>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* History */}
+      <div style={{ flex: 1, overflow: 'auto', padding: '8px 6px' }}>
+        <div style={{ color: C.comment, fontSize: '10px', marginBottom: 5, paddingLeft: 4 }}>最近查询</div>
+        {history.map((item, i) => (
+          <div key={i} onClick={() => explain(item.term)}
+            style={{
+              padding: '4px 8px', marginBottom: 2,
+              cursor: 'pointer',
+              borderLeft: `2px solid ${C.overlay}`,
+              transition: 'all 0.12s',
+            }}
+            onMouseEnter={e => {
+              e.currentTarget.style.borderLeftColor = C.mauve;
+              e.currentTarget.style.background = C.overlay + '55';
+            }}
+            onMouseLeave={e => {
+              e.currentTarget.style.borderLeftColor = C.overlay;
+              e.currentTarget.style.background = 'transparent';
+            }}>
+            <div style={{ color: C.blue, fontSize: '11px' }}>{item.term}</div>
+            <div style={{ color: C.comment, fontSize: '10px' }}>{item.zh}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── MESSAGE BUBBLE ────────────────────────────────────────────────────
+function MsgBubble({ msg }) {
+  const isUser = msg.role === 'user';
+  const isSystem = msg.role === 'system';
+  return (
+    <div className="scan-in" style={{
+      marginBottom: 10,
+      display: 'flex', flexDirection: 'column',
+      alignItems: isUser ? 'flex-end' : 'flex-start',
+    }}>
+      {!isSystem && (
+        <div style={{ fontSize: '10px', color: C.comment, marginBottom: 3 }}>
+          {isUser ? '▸ 你' : '◆ RepoTutor'}
+        </div>
+      )}
+      <div style={{
+        maxWidth: isSystem ? '100%' : '92%',
+        padding: isSystem ? '2px 0' : '7px 11px',
+        background: isSystem ? 'transparent' : (isUser ? C.overlay : C.surface),
+        border: isSystem ? 'none' : `1px solid ${isUser ? C.muted : C.overlay}`,
+        borderLeft: !isUser && !isSystem ? `2px solid ${C.cyan}` : undefined,
+        color: msg.color || (isUser ? C.text : C.sub1),
+        fontSize: '12px', lineHeight: 1.7,
+        whiteSpace: 'pre-wrap',
+      }}>
+        {msg.content}
+      </div>
+    </div>
+  );
+}
+
+// ── CHAT PANEL ────────────────────────────────────────────────────────
+function ChatPanel({ messages, onSend, parseState, parseLog, mode, setMode, onParseRepo, repoUrl, setRepoUrl }) {
+  const [input, setInput] = useState('');
+  const chatRef = useRef(null);
+  const endRef = useRef(null);
+
+  useEffect(() => {
+    if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
+  }, [messages, parseLog]);
+
+  const send = () => {
+    if (!input.trim()) return;
+    onSend(input.trim()); setInput('');
+  };
+
+  return (
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', height: '100%', minWidth: 0 }}>
+
+      {/* Repo URL bar */}
+      <div style={{
+        padding: '6px 12px', borderBottom: `1px solid ${C.overlay}`,
+        background: C.surface, display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0,
+      }}>
+        <span style={{ color: C.comment, fontSize: '11px', whiteSpace: 'nowrap' }}>
+          github.com/
+        </span>
+        <input
+          value={repoUrl}
+          onChange={e => setRepoUrl(e.target.value)}
+          onKeyDown={e => e.key === 'Enter' && onParseRepo()}
+          placeholder="owner/repository"
+          disabled={parseState === 'parsing'}
+          style={{
+            flex: 1, background: 'transparent',
+            border: 'none',
+            borderBottom: `1px solid ${parseState === 'parsing' ? C.yellow : C.subtle}`,
+            color: C.cyan, padding: '2px 4px', fontSize: '12px', minWidth: 0,
+          }}
+        />
+        <button onClick={onParseRepo} disabled={parseState === 'parsing'} style={{
+          background: parseState === 'parsing' ? C.muted : C.cyan,
+          color: C.surface2,
+          border: 'none', padding: '3px 12px', fontSize: '11px',
+          cursor: parseState === 'parsing' ? 'default' : 'pointer',
+          fontWeight: 700, letterSpacing: '0.04em', whiteSpace: 'nowrap',
+        }}>
+          {parseState === 'parsing' ? '◆◆◆' : '► 解析'}
+        </button>
+      </div>
+
+      {/* Parse log — fixed at top, collapses when done */}
+      {parseLog.length > 0 && (
+        <div style={{
+          padding: '8px 12px',
+          background: C.surface, borderBottom: `1px solid ${C.overlay}`,
+          borderLeft: `2px solid ${C.yellow}`,
+          flexShrink: 0,
+          maxHeight: parseState === 'done' ? 72 : 220,
+          overflow: 'auto',
+          transition: 'max-height 0.4s ease',
+        }}>
+          <div style={{ color: C.yellow, fontSize: '10px', marginBottom: 4, letterSpacing: '0.08em', display: 'flex', alignItems: 'center', gap: 8 }}>
+            ► REPO PARSER
+            {parseState === 'done' && <span style={{ color: C.green }}>✓ 完成</span>}
+            {parseState === 'parsing' && <Cursor />}
+          </div>
+          {(parseState === 'done' ? parseLog.slice(-2) : parseLog).map((line, i) => (
+            <div key={i} className="scan-in" style={{
+              color: line.color, fontSize: '11px', lineHeight: 1.65,
+              animationDelay: `${i * 0.02}s`,
+            }}>
+              {line.text}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Messages */}
+      <div ref={chatRef} style={{ flex: 1, overflow: 'auto', padding: '14px 14px 6px' }}>
+        {messages.map(m => <MsgBubble key={m.id} msg={m} />)}
+        <div ref={endRef} />
+      </div>
+
+      {/* Mode selector */}
+      <div style={{
+        padding: '5px 12px', borderTop: `1px solid ${C.overlay}`,
+        background: C.surface,
+        display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0,
+      }}>
+        <span style={{ color: C.comment, fontSize: '10px' }}>生成模式</span>
+        {[
+          { key: 'chat',  label: '普通聊天',   color: C.cyan  },
+          { key: 'deep',  label: '深度研究报告', color: C.mauve },
+        ].map(m => (
+          <button key={m.key} onClick={() => setMode(m.key)} style={{
+            background: mode === m.key ? m.color + '20' : 'transparent',
+            color: mode === m.key ? m.color : C.comment,
+            border: `1px solid ${mode === m.key ? m.color : C.overlay}`,
+            padding: '2px 10px', fontSize: '11px',
+            cursor: 'pointer', letterSpacing: '0.03em',
+            transition: 'all 0.15s',
+          }}>
+            {mode === m.key ? '● ' : '○ '}{m.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Input */}
+      <div style={{
+        padding: '7px 12px', borderTop: `1px solid ${C.overlay}`,
+        background: C.surface2,
+        display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0,
+      }}>
+        <span style={{ color: C.green, fontSize: '13px' }}>›</span>
+        <input
+          value={input}
+          onChange={e => setInput(e.target.value)}
+          onKeyDown={e => e.key === 'Enter' && send()}
+          placeholder={mode === 'deep' ? '描述研究方向或具体问题...' : '向 RepoTutor 提问...'}
+          style={{
+            flex: 1, background: 'transparent', border: 'none',
+            color: C.text, fontSize: '12px',
+          }}
+        />
+        <button onClick={send} style={{
+          background: 'transparent', color: C.green,
+          border: `1px solid ${C.green}44`,
+          padding: '3px 9px', fontSize: '11px', cursor: 'pointer',
+        }}>发送</button>
+      </div>
+    </div>
+  );
+}
+
+// ── AGENT STATUS PANEL ────────────────────────────────────────────────
+function AgentStatusPanel({ agentState, callCount, tokenCount, currentActivity }) {
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => setTick(x => x + 1), 500);
+    return () => clearInterval(t);
+  }, []);
+  const s = AGENT_STATES[agentState] || AGENT_STATES.idle;
+  const dots = '.'.repeat((tick % 3) + 1).padEnd(3, ' ');
+
+  const steps = [
+    { label: 'thinking',    active: agentState === 'thinking'    },
+    { label: 'acting',      active: agentState === 'acting'      },
+    { label: 'scanning',    active: agentState === 'scanning'    },
+    { label: 'teaching',    active: agentState === 'teaching'    },
+    { label: 'researching', active: agentState === 'researching' },
+  ];
+
+  return (
+    <div style={{
+      borderBottom: `1px solid ${C.overlay}`,
+      background: C.surface, flexShrink: 0,
+    }}>
+      <PanelHeader icon="◈" label="AGENT STATUS" color={s.color} />
+      <div style={{ padding: '8px 10px' }}>
+        {/* Current state */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+          <Dot color={s.color} pulse={agentState !== 'idle'} />
+          <span style={{
+            color: s.color, fontSize: '13px', fontWeight: 700,
+            textShadow: `0 0 8px ${s.color}66`,
+          }}>
+            {s.label}{agentState !== 'idle' ? dots : ''}
+          </span>
+        </div>
+        {/* State trace */}
+        <div style={{ display: 'flex', gap: 4, marginBottom: 8, flexWrap: 'wrap' }}>
+          {steps.map(st => (
+            <span key={st.label} style={{
+              fontSize: '9px', padding: '1px 6px',
+              background: st.active ? s.color + '22' : C.overlay,
+              color: st.active ? s.color : C.comment,
+              border: `1px solid ${st.active ? s.color + '66' : 'transparent'}`,
+              transition: 'all 0.3s',
+            }}>{st.label}</span>
+          ))}
+        </div>
+        {/* Metrics */}
+        <div style={{ fontSize: '10px', lineHeight: 1.8, color: C.comment }}>
+          <div>调用次数 <span style={{ color: C.blue }}>{callCount}</span></div>
+          <div>Token    <span style={{ color: C.yellow }}>{tokenCount > 0 ? `${(tokenCount/1000).toFixed(1)}k` : '0'}</span></div>
+          <div>状态     <span style={{ color: s.color }}>{s.label}</span></div>
+          <div>动作     <span style={{ color: C.sub0 }}>{currentActivity || '等待任务'}</span></div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── DESKTOP PET ───────────────────────────────────────────────────────
+function DesktopPet({ agentState }) {
+  const [frame, setFrame] = useState(0);
+  const [tick, setTick] = useState(0);
+  const s = AGENT_STATES[agentState] || AGENT_STATES.idle;
+  const mood = s.petMood;
+  const frames = PET[mood] || PET.idle;
+
+  useEffect(() => {
+    setFrame(0);
+  }, [agentState]);
+
+  useEffect(() => {
+    const speed = agentState === 'scanning' ? 400 : agentState === 'thinking' ? 700 : 900;
+    const t = setInterval(() => {
+      setFrame(f => (f + 1) % frames.length);
+      setTick(x => x + 1);
+    }, speed);
+    return () => clearInterval(t);
+  }, [agentState, frames.length]);
+
+  const dots = ['·', '··', '···'][(tick % 3)];
+
+  return (
+    <div style={{
+      borderBottom: `1px solid ${C.overlay}`,
+      background: C.surface2,
+      flexShrink: 0,
+      padding: '8px 10px',
+    }}>
+      <PanelHeader icon="◈" label="小助手" color={C.peach} />
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', paddingTop: 8 }}>
+        <pre style={{
+          fontFamily: 'inherit', fontSize: '12px', lineHeight: 1.55,
+          color: C.yellow,
+          textShadow: `0 0 12px ${C.yellow}55`,
+          margin: '0 0 8px',
+          animation: 'float 2.5s ease-in-out infinite',
+          textAlign: 'left',
+          userSelect: 'none',
+        }}>{frames[frame]}</pre>
+
+        <div style={{
+          fontSize: '11px', color: s.color,
+          textShadow: `0 0 8px ${s.color}77`,
+          letterSpacing: '0.04em',
+        }}>
+          {s.petMsg}{dots}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── CODE VIEWER ───────────────────────────────────────────────────────
+function CodeViewer({ snippet }) {
+  const code = snippet?.code || '';
+  const lines = code.split('\n');
+  const range = snippet?.startLine && snippet?.endLine
+    ? `:${snippet.startLine}-${snippet.endLine}`
+    : '';
+
+  const tokenize = (line) => {
+    if (line.trimStart().startsWith('//') || line.trimStart().startsWith('*') || line.trimStart().startsWith('/*')) {
+      return <span style={{ color: C.comment }}>{line}</span>;
+    }
+    const parts = [];
+    let i = 0; let k = 0;
+
+    const KW = /\b(const|let|var|function|class|interface|type|return|if|else|while|for|new|this|import|export|default|extends|implements|private|public|async|await|void|null|undefined|true|false)\b/g;
+    const STR = /('(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|`(?:[^`\\]|\\.)*`)/g;
+    const NUM = /\b(\d+(?:\.\d+)?)\b/g;
+    const TYPEHINT = /:\s*([A-Z][a-zA-Z<>[\]|, ]*)/g;
+
+    // Combined pass
+    const tokens = [];
+    let regex = /('(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|`(?:[^`\\]|\\.)*`|\b(?:const|let|var|function|class|interface|type|return|if|else|while|for|new|this|import|export|default|extends|implements|private|public|async|await|void|null|undefined|true|false)\b|\b\d+(?:\.\d+)?\b)/g;
+    let last = 0; let m;
+    while ((m = regex.exec(line)) !== null) {
+      if (m.index > last) parts.push(<span key={k++} style={{ color: C.text }}>{line.slice(last, m.index)}</span>);
+      const tok = m[0];
+      let col = C.text;
+      if (/^['"`]/.test(tok)) col = C.green;
+      else if (/^\d/.test(tok)) col = C.peach;
+      else col = C.mauve;
+      parts.push(<span key={k++} style={{ color: col }}>{tok}</span>);
+      last = m.index + tok.length;
+    }
+    if (last < line.length) parts.push(<span key={k++} style={{ color: C.text }}>{line.slice(last)}</span>);
+    return parts;
+  };
+
+  return (
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0 }}>
+      <PanelHeader icon="◈" label="教学代码" color={C.green}
+        right={code ? `${snippet?.path || 'snippet'}${range}` : '等待推送'} />
+      <div style={{
+        flex: 1, overflow: 'auto',
+        background: C.surface2, padding: '8px 0',
+      }}>
+        {!code ? (
+          <div style={{
+            display: 'flex', flexDirection: 'column',
+            alignItems: 'center', justifyContent: 'center',
+            height: '100%', color: C.comment, fontSize: '11px', gap: 8,
+          }}>
+            <span>◈ 等待 Agent 推送教学代码</span>
+            <Cursor />
+          </div>
+        ) : (
+          lines.map((line, i) => (
+            <div key={i} style={{
+              display: 'flex',
+              paddingLeft: 0,
+              lineHeight: 1.7,
+              fontSize: '11px',
+              fontFamily: 'inherit',
+            }}>
+              <span style={{
+                color: C.muted, userSelect: 'none',
+                textAlign: 'right', minWidth: 28,
+                paddingRight: 10, paddingLeft: 6,
+                flexShrink: 0, fontSize: '10px',
+              }}>{i + 1}</span>
+              <span style={{ color: C.text, flex: 1, paddingRight: 10, whiteSpace: 'pre' }}>
+                {tokenize(line)}
+              </span>
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── STATUS BAR ────────────────────────────────────────────────────────
+function StatusBar({ agentState, mode, parseState, callCount }) {
+  const [now, setNow] = useState(new Date());
+  useEffect(() => {
+    const t = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(t);
+  }, []);
+  const s = AGENT_STATES[agentState] || AGENT_STATES.idle;
+  const modeLabel = mode === 'deep' ? '深度研究' : '普通聊天';
+
+  return (
+    <div style={{
+      height: 26, background: C.surface,
+      borderTop: `1px solid ${C.overlay}`,
+      display: 'flex', alignItems: 'center',
+      padding: '0 12px', gap: 10,
+      fontSize: '11px', flexShrink: 0,
+      userSelect: 'none',
+    }}>
+      {/* Indicator dots */}
+      <div style={{ display: 'flex', gap: 3, alignItems: 'center' }}>
+        {[C.red, C.yellow, C.green].map((c, i) => (
+          <div key={i} style={{ width: 6, height: 6, background: c, boxShadow: `0 0 4px ${c}` }} />
+        ))}
+      </div>
+      <span style={{ color: C.subtle }}>│</span>
+
+      <span style={{ color: s.color }}>◆ {s.label}</span>
+      <span style={{ color: C.subtle }}>·</span>
+      <span style={{ color: C.comment }}>{modeLabel}</span>
+
+      {parseState === 'done' && (
+        <>
+          <span style={{ color: C.subtle }}>·</span>
+          <span style={{ color: C.green }}>✓ 仓库已加载</span>
+        </>
+      )}
+
+      <div style={{ flex: 1 }} />
+
+      <span style={{ color: C.comment }}>
+        <span style={{ color: C.sub0 }}>esc</span> 中断
+        {' · '}
+        <span style={{ color: C.sub0 }}>tab</span> 切换面板
+        {' · '}
+        <span style={{ color: C.sub0 }}>ctrl+p</span> 命令
+      </span>
+      <span style={{ color: C.subtle }}>│</span>
+      <span style={{ color: C.comment }}>
+        {now.toLocaleTimeString('zh-CN', { hour12: false })}
+      </span>
+    </div>
+  );
+}
+
+// ── TITLE BAR ─────────────────────────────────────────────────────────
+function TitleBar() {
+  return (
+    <div style={{
+      height: 30, background: C.surface2,
+      borderBottom: `1px solid ${C.overlay}`,
+      display: 'flex', alignItems: 'center',
+      padding: '0 12px', gap: 10, flexShrink: 0,
+      userSelect: 'none',
+    }}>
+      {/* Traffic lights */}
+      <div style={{ display: 'flex', gap: 5 }}>
+        {[C.red, C.yellow, C.green].map((c, i) => (
+          <div key={i} style={{
+            width: 10, height: 10, borderRadius: '50%',
+            background: c, opacity: 0.85,
+          }} />
+        ))}
+      </div>
+      <span style={{ color: C.comment, fontSize: '11px', letterSpacing: '0.03em' }}>
+        ◆ RepoTutor
+      </span>
+      {/* Tab-like */}
+      <div style={{
+        padding: '2px 14px', background: C.bg,
+        border: `1px solid ${C.overlay}`,
+        borderBottom: 'none',
+        color: C.cyan, fontSize: '11px',
+      }}>
+        main  ×
+      </div>
+      <div style={{ flex: 1 }} />
+      <span style={{ color: C.comment, fontSize: '10px' }}>v0.1.0 · TUI Mode</span>
+    </div>
+  );
+}
+
+// ── MAIN APP ──────────────────────────────────────────────────────────
+function App() {
+  const [repoUrl, setRepoUrl]   = useState('');
+  const [sessionId, setSessionId] = useState(null);
+  const [parseState, setPState] = useState('idle');
+  const [parseLog, setPLog]     = useState([]);
+  const [agentState, setAgent]  = useState('idle');
+  const [messages, setMsgs]     = useState(INIT_MSGS);
+  const [mode, setMode]         = useState('chat');
+  const [codeSnippet, setCodeSnippet] = useState(null);
+  const [callCount, setCalls]   = useState(0);
+  const [tokenCount, setTokens] = useState(0);
+  const [currentActivity, setCurrentActivity] = useState(null);
+  const streamClosers = useRef({ repo: null, chat: null });
+  const activeAssistantId = useRef(null);
+
+  const closeStream = useCallback((kind) => {
+    if (streamClosers.current[kind]) {
+      streamClosers.current[kind]();
+      streamClosers.current[kind] = null;
+    }
+  }, []);
+
+  const appendParseLog = useCallback((text, color = C.yellow) => {
+    setPLog(prev => [...prev, { text, color }]);
+  }, []);
+
+  const applyAgentStatus = useCallback((payload) => {
+    if (!payload) return;
+    const status = payload.status || payload;
+    const activity = payload.activity || status.activity;
+    setAgent(mapAgentState(status));
+    setCurrentActivity(
+      status.current_action ||
+      status.currentAction ||
+      activity?.summary ||
+      status.summary ||
+      null
+    );
+
+    const metrics = status.metrics || {};
+    if (Number.isFinite(metrics.llm_call_count)) setCalls(metrics.llm_call_count);
+    if (Number.isFinite(metrics.tool_call_count)) {
+      setCalls(Math.max(metrics.llm_call_count || 0, metrics.tool_call_count || 0));
+    }
+    if (Number.isFinite(metrics.token_count)) setTokens(metrics.token_count);
+  }, []);
+
+  const upsertAssistantMessage = useCallback((messageId, update) => {
+    const id = messageId || activeAssistantId.current || `msg_agent_${Date.now()}`;
+    activeAssistantId.current = id;
+    setMsgs(prev => {
+      const idx = prev.findIndex(m => m.id === id);
+      if (idx === -1) {
+        return [...prev, update({ id, role: 'assistant', content: '' })];
+      }
+      const next = [...prev];
+      next[idx] = update(next[idx]);
+      return next;
+    });
+  }, []);
+
+  const handleRuntimeEvent = useCallback((name, payload) => {
+    const eventName = payload?.event_type || name;
+
+    if (eventName === 'agent_status') {
+      applyAgentStatus(payload.status || payload);
+      return;
+    }
+
+    if (eventName === 'agent_activity') {
+      applyAgentStatus({ activity: payload.activity });
+      appendParseLog(logTextFromEvent(eventName, payload), colorForEvent(eventName, payload));
+      return;
+    }
+
+    if (eventName === 'status_changed') {
+      applyAgentStatus(payload);
+      if (payload.status === 'chatting') setPState(prev => prev === 'parsing' ? 'done' : prev);
+      return;
+    }
+
+    if (eventName === 'repo_parse_log' || eventName === 'analysis_progress' || eventName === 'deep_research_progress' || eventName === 'degradation_notice') {
+      appendParseLog(logTextFromEvent(eventName, payload), colorForEvent(eventName, payload));
+      if (eventName === 'deep_research_progress') setAgent('researching');
+      return;
+    }
+
+    if (eventName === 'repo_connected') {
+      const snippet = snippetFromPayload(payload);
+      if (snippet) setCodeSnippet(snippet);
+      setPState('done');
+      setAgent('teaching');
+      setCurrentActivity('等待你的下一个问题');
+      appendParseLog('✓ 解析完成 · 可以开始学习了！', C.green);
+      const display = payload.repository?.display_name || '当前仓库';
+      setMsgs(prev => [...prev, {
+        id: `repo_ready_${Date.now()}`,
+        role: 'assistant',
+        content: payload.initial_message || `✓ 仓库「${display}」解析完成！\n\n已接入仓库上下文，可以开始普通聊天或深度研究。`,
+      }]);
+      return;
+    }
+
+    if (eventName === 'teaching_code') {
+      const snippet = snippetFromPayload(payload);
+      if (snippet) setCodeSnippet(snippet);
+      return;
+    }
+
+    if (eventName === 'answer_stream_start') {
+      activeAssistantId.current = payload.message_id || `msg_agent_${Date.now()}`;
+      upsertAssistantMessage(activeAssistantId.current, msg => ({ ...msg, content: '' }));
+      applyAgentStatus({ state: mode === 'deep' ? 'researching' : 'teaching', current_action: '正在组织回答' });
+      return;
+    }
+
+    if (eventName === 'answer_stream_delta') {
+      upsertAssistantMessage(payload.message_id, msg => ({
+        ...msg,
+        content: `${msg.content || ''}${payload.delta_text || ''}`,
+      }));
+      return;
+    }
+
+    if (eventName === 'answer_stream_end') {
+      activeAssistantId.current = payload.message_id || activeAssistantId.current;
+      return;
+    }
+
+    if (eventName === 'message_completed') {
+      const finalMessage = makeUiMessage(payload.message);
+      activeAssistantId.current = null;
+      setPState(prev => prev === 'parsing' ? 'done' : prev);
+      setAgent(mode === 'deep' ? 'researching' : 'teaching');
+      setCurrentActivity('等待你的下一个问题');
+      setMsgs(prev => {
+        const idx = prev.findIndex(m => m.id === finalMessage.id);
+        if (idx === -1) return [...prev, finalMessage];
+        const next = [...prev];
+        next[idx] = finalMessage;
+        return next;
+      });
+      const snippet = snippetFromPayload(payload);
+      if (snippet) setCodeSnippet(snippet);
+      if (payload.agent_status) applyAgentStatus(payload.agent_status);
+      return;
+    }
+
+    if (eventName === 'run_cancelled') {
+      applyAgentStatus(payload.agent_status || { state: 'idle', current_action: '已中断' });
+      appendParseLog('◆ 当前任务已中断', C.peach);
+      return;
+    }
+
+    if (eventName === 'error') {
+      const message = payload?.error?.message || '连接中断，请稍后重试。';
+      setPState(prev => prev === 'parsing' ? 'idle' : prev);
+      setAgent('idle');
+      setCurrentActivity(message);
+      setMsgs(prev => [...prev, {
+        id: `err_${Date.now()}`,
+        role: 'assistant',
+        content: `◆ ${message}`,
+        color: C.red,
+      }]);
+    }
+  }, [appendParseLog, applyAgentStatus, mode, upsertAssistantMessage]);
+
+  const handleParse = useCallback(async () => {
+    if (!repoUrl.trim() || parseState === 'parsing') return;
+    closeStream('repo');
+    closeStream('chat');
+    activeAssistantId.current = null;
+
+    const normalized = normalizeGithubInput(repoUrl);
+    setPState('parsing');
+    setPLog([]);
+    setAgent('scanning');
+    setCurrentActivity('提交仓库接入请求');
+    setCodeSnippet(null);
+    appendParseLog(`◆ 提交仓库: ${normalized}`, C.yellow);
+
+    try {
+      const payload = await RepoTutorApi.createRepoSession(repoUrl, mode);
+      const data = unwrapData(payload);
+      const sid = payload.session_id || data?.session_id;
+      if (!sid) throw new Error('后端没有返回 session_id');
+      setSessionId(sid);
+      if (data?.agent_status) applyAgentStatus(data.agent_status);
+
+      const display = data?.repository?.display_name || normalized.replace(/^https:\/\/github\.com\//, '');
+      appendParseLog(`✓ 接入请求已接受: ${display}`, C.green);
+
+      const streamUrl = data?.repo_stream_url || data?.analysis_stream_url || `/api/v4/repositories/stream?session_id=${encodeURIComponent(sid)}`;
+      streamClosers.current.repo = RepoTutorApi.openStream(streamUrl, handleRuntimeEvent, () => {});
+    } catch (err) {
+      const msg = err?.payload?.message || err.message || '仓库接入失败';
+      setPState('idle');
+      setAgent('idle');
+      setCurrentActivity(msg);
+      appendParseLog(`◆ ${msg}`, C.red);
+      setMsgs(prev => [...prev, { id: `repo_err_${Date.now()}`, role: 'assistant', content: `◆ ${msg}`, color: C.red }]);
+    }
+  }, [appendParseLog, applyAgentStatus, closeStream, handleRuntimeEvent, mode, parseState, repoUrl]);
+
+  const handleSend = useCallback(async (text) => {
+    if (!sessionId) {
+      setMsgs(prev => [...prev, {
+        id: `need_repo_${Date.now()}`,
+        role: 'assistant',
+        content: '◆ 请先解析并接入一个 GitHub 仓库。',
+        color: C.peach,
+      }]);
+      return;
+    }
+
+    setMsgs(prev => [...prev, { id: Date.now(), role: 'user', content: text }]);
+    setAgent(mode === 'deep' ? 'researching' : 'thinking');
+    setCurrentActivity(mode === 'deep' ? '启动深度研究' : '理解你的问题');
+
+    try {
+      closeStream('chat');
+      const payload = await RepoTutorApi.sendMessage(sessionId, text, mode);
+      const data = unwrapData(payload);
+      if (data?.agent_status) applyAgentStatus(data.agent_status);
+      const streamUrl = data?.chat_stream_url || `/api/v4/chat/stream?session_id=${encodeURIComponent(sessionId)}&turn_id=${encodeURIComponent(data?.turn_id || '')}`;
+      streamClosers.current.chat = RepoTutorApi.openStream(streamUrl, handleRuntimeEvent, () => {});
+    } catch (err) {
+      const msg = err?.payload?.message || '连接中断，请稍后重试。';
+      setMsgs(prev => [...prev, {
+        id: Date.now() + 1, role: 'assistant',
+        content: `◆ ${msg}`, color: C.red,
+      }]);
+      setAgent(parseState === 'done' ? 'teaching' : 'idle');
+      setCurrentActivity(msg);
+    }
+  }, [applyAgentStatus, closeStream, handleRuntimeEvent, mode, parseState, sessionId]);
+
+  useEffect(() => {
+    return () => {
+      closeStream('repo');
+      closeStream('chat');
+    };
+  }, [closeStream]);
+
+  useEffect(() => {
+    if (!sessionId) return;
+    let cancelled = false;
+    const refreshStatus = async () => {
+      try {
+        const payload = await RepoTutorApi.getAgentStatus(sessionId);
+        if (!cancelled) applyAgentStatus(unwrapData(payload));
+      } catch (_) {
+        // Existing backends may not expose the v4 status hook yet.
+      }
+    };
+    refreshStatus();
+    const t = setInterval(refreshStatus, 2500);
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+    };
+  }, [applyAgentStatus, sessionId]);
+
+  useEffect(() => {
+    const onKeyDown = async (event) => {
+      if (event.key !== 'Escape' || !sessionId) return;
+      try {
+        const payload = await RepoTutorApi.cancel(sessionId);
+        const data = unwrapData(payload);
+        applyAgentStatus(data?.agent_status || { state: 'idle', current_action: '已中断' });
+      } catch (_) {
+        setAgent('idle');
+        setCurrentActivity('已请求中断');
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [applyAgentStatus, sessionId]);
+
+  return (
+    <div style={{
+      width: '100vw', height: '100vh',
+      display: 'flex', flexDirection: 'column',
+      background: C.bg, overflow: 'hidden',
+    }}>
+      <TitleBar />
+
+      <div style={{ flex: 1, display: 'flex', overflow: 'hidden', minHeight: 0 }}>
+        {/* LEFT: Glossary */}
+        <div style={{ width: 162, flexShrink: 0 }}>
+          <GlossaryPanel sessionId={sessionId} />
+        </div>
+
+        {/* CENTER: Chat */}
+        <ChatPanel
+          messages={messages} onSend={handleSend}
+          parseState={parseState} parseLog={parseLog}
+          mode={mode} setMode={setMode}
+          onParseRepo={handleParse}
+          repoUrl={repoUrl} setRepoUrl={setRepoUrl}
+        />
+
+        {/* RIGHT: Agent + Pet + Code */}
+        <div style={{
+          width: 258, flexShrink: 0,
+          display: 'flex', flexDirection: 'column',
+          borderLeft: `1px solid ${C.overlay}`,
+          overflow: 'hidden',
+        }}>
+          <AgentStatusPanel
+            agentState={agentState}
+            callCount={callCount}
+            tokenCount={tokenCount}
+            currentActivity={currentActivity}
+          />
+          <DesktopPet agentState={agentState} />
+          <CodeViewer snippet={codeSnippet} />
+        </div>
+      </div>
+
+      <StatusBar agentState={agentState} mode={mode} parseState={parseState} callCount={callCount} />
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>

@@ -1,0 +1,1 @@
+# TeacherAgent 提示词：system + user_template，注入 question / scratchpad_evidence / previous_covered / next_anchor_hint，输出自然教学正文（不要 JSON）。

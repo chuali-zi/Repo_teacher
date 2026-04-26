@@ -1,0 +1,1 @@
+# ToolRuntime：注册 enabled_tools 构建 valid_actions 集合（含别名 + 控制动作 done），execute(action, action_input, ctx) 路由到对应 tool 并注入运行时上下文，提供 build_planner_description / build_reader_description 两种渲染（抄自 DeepTutor solve/tool_runtime.py:44-219）。

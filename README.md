@@ -1,101 +1,52 @@
 # Repo Tutor
 
-Repo Tutor is a read-only repository teaching agent. The current runtime is deliberately conservative: the backend only provides repository access, file-tree indexing, teaching state, and safe source-reading tools. It does not generate static explanations of entry points, flows, layers, or dependencies for the agent to repeat as facts.
+Repo Tutor 是一个证据优先、只读的代码仓库教学助手。当前唯一有效的运行时组合是
+`backend/` + `web_v3/`。
 
-## Current Runtime
+## 当前真相源
 
-- Active stack: `backend/` + `web_v2/`
-- `web_v2/` is the default live frontend. `web/` is a legacy static fallback, and `frontend/` is the older React/Vite prototype.
-- Agent messages render from `MessageDto.raw_text`. The frontend does not synthesize visible prose from `structured_content` or `initial_report_content`.
-- `structured_content` and `initial_report_content` still exist in the backend/SSE contracts for teaching state, suggestions, and compatibility.
-- Chat turns allow up to `50` tool rounds by default. Set `REPO_TUTOR_MAX_TOOL_ROUNDS` to override it.
-- Chat turns time out after `600` seconds by default. Set `REPO_TUTOR_CHAT_TURN_TIMEOUT_SECONDS` to override it.
-- `MAX_SELECTED_TOOLS = 5` only limits how many tool schemas are exposed in one round.
+- 当前架构：`docs/current_architecture.md`
+- 数据契约：`docs/data_contracts.md`
+- 协议说明：`docs/protocols.md`
 
-## Architecture
+以上 3 份文档与当前代码一起构成维护基线。`new_docs/`、`web/`、`web_v2/` 仅视为历史
+或草稿，不再作为当前实现依据。
 
-### What the backend still does
+## 当前运行时
 
-- `m1_repo_access`: validate local paths or public GitHub URLs and establish a read-only repository boundary
-- `m2_file_tree`: scan the repository, apply ignore and sensitive-file policy, and build a compact file-tree index
-- `m5_session`: manage session lifecycle, SSE events, teaching plan, student state, and prompt assembly
-- `m6_response`: build prompts, stream LLM output, parse sidecar JSON, and run tool-calling loops
-- `agent_tools` + `agent_runtime`: expose safe read-only tools such as file listing, text search, and bounded file excerpts
+- 后端：`backend/`，FastAPI + SSE
+- 前端：`web_v3/`，静态 HTML + 浏览器端 React UMD/Babel
+- 默认前端端口：`5181`
+- 后端端口：`8000`
+- 可见消息正文来自 `MessageDto.raw_text` 与 SSE `delta_text`
+- `structured_content` 与 `initial_report_content` 仍然保留，用于结构化补充、证据引用和兼容
 
-### What the backend no longer does
+## 目录概览
 
-- No `m3`-style static entry inference
-- No `m4`-style teaching skeleton or topic index
-- No static `repo_kb` query layer
-- No backend-authored “likely architecture” payload presented as verified teaching facts
+- `backend/`：当前后端，包含路由、契约、会话编排、工具执行、安全规则和测试
+- `web_v3/`：当前前端
+- `docs/`：当前维护文档，仅保留架构、数据契约、协议三件套
+- `scripts/`：Windows 启动脚本；`dev_web.cmd` / `dev_all.cmd` 默认启动 `web_v3`
+- `new_docs/`：历史调研或草稿，不是 source of truth
+- `web/`、`web_v2/`：废弃前端，默认不要参考
 
-### Current flow
+## 快速开始
 
-Initial session:
+### 1. 安装依赖
 
-1. `POST /api/repo`
-2. M1 validates access
-3. M2 scans the file tree
-4. M5 initializes lightweight teaching state from the file tree
-5. M6 generates the initial report with tool calling enabled
-6. The agent verifies source files directly when needed
-
-Follow-up turns:
-
-1. `POST /api/chat`
-2. M5 builds a prompt from conversation state + file-tree context
-3. M6 may call read-only tools such as `m2.list_relevant_files`, `search_text`, and `read_file_excerpt`
-4. The answer must stay evidence-first and mark uncertainty when source verification is incomplete
-
-## Tooling Model
-
-The agent can rely on:
-
-- `m1.get_repository_context`
-- `m2.get_file_tree_summary`
-- `m2.list_relevant_files`
-- `teaching.get_state_snapshot`
-- `search_text`
-- `read_file_excerpt`
-
-The backend should not expose tools that return inferred entry points, module maps, reading paths, or “teaching skeleton” facts.
-
-## Directory Guide
-
-```text
-Irene/
-├── backend/
-│   ├── main.py
-│   ├── contracts/
-│   ├── routes/
-│   ├── m1_repo_access/
-│   ├── m2_file_tree/
-│   ├── m5_session/
-│   ├── m6_response/
-│   ├── llm_tools/
-│   ├── agent_tools/
-│   ├── agent_runtime/
-│   ├── security/
-│   └── tests/
-├── web/
-├── frontend/
-├── docs/
-├── scripts/
-├── llm_config.example.json
-└── pyproject.toml
+```bash
+uv sync --extra dev
 ```
 
-## Quick Start
+或：
 
-### 1. Requirements
+```bash
+python -m pip install -e ".[dev]"
+```
 
-- Python `3.11+`
-- `git` on `PATH` if you want to inspect public GitHub repositories
-- An OpenAI-compatible model endpoint
+### 2. 配置模型
 
-### 2. Configure the LLM
-
-Create `llm_config.json` in the repo root:
+在仓库根目录创建 `llm_config.json`：
 
 ```json
 {
@@ -106,7 +57,7 @@ Create `llm_config.json` in the repo root:
 }
 ```
 
-Supported environment variable overrides:
+可选环境变量覆盖：
 
 - `REPO_TUTOR_LLM_API_KEY`
 - `REPO_TUTOR_LLM_BASE_URL`
@@ -116,95 +67,72 @@ Supported environment variable overrides:
 - `REPO_TUTOR_MAX_TOOL_ROUNDS`
 - `REPO_TUTOR_CHAT_TURN_TIMEOUT_SECONDS`
 
-### 3. Install dependencies
-
-```bash
-uv sync --extra dev
-```
-
-Or:
-
-```bash
-python -m pip install -e ".[dev]"
-```
-
-### 4. Run the backend
+### 3. 启动后端
 
 ```bash
 python -m uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-Or:
+或：
 
 ```bash
 scripts\dev_backend.cmd
 ```
 
-### 5. Run the live frontend
+### 4. 启动默认前端 `web_v3`
 
 ```bash
-cd web_v2
-python -m http.server 5180 --bind 127.0.0.1
+cd web_v3
+python -m http.server 5181 --bind 127.0.0.1
 ```
 
-Or:
+或：
 
 ```bash
 scripts\dev_web.cmd
 scripts\dev_all.cmd
 ```
 
-Legacy static frontend:
+显式别名脚本仍可用：
 
 ```bash
-scripts\dev_web_legacy.cmd
-scripts\dev_all_legacy.cmd
+scripts\dev_v3.cmd
 ```
 
-### 6. Use it
+### 5. 使用方式
 
-1. Open `http://127.0.0.1:5180`
-2. Submit a local repository path or `https://github.com/owner/repo`
-3. Wait for the initial report
-4. Continue asking source-oriented questions such as “where should I verify the entry?”, “read `main.py` with me”, or “show me the files related to the API layer”
+1. 打开 `http://127.0.0.1:5181`
+2. 提交本地仓库绝对路径或 `https://github.com/owner/repo`
+3. 等待初始分析完成
+4. 继续围绕源码证据提问
 
-## API Summary
+## 最小 API 概览
 
-| Endpoint | Method | Purpose |
+| Endpoint | Method | 用途 |
 | --- | --- | --- |
-| `/api/repo/validate` | `POST` | Validate input only |
-| `/api/repo` | `POST` | Create a session and start analysis |
-| `/api/session` | `GET` | Return the current snapshot |
-| `/api/session` | `DELETE` | Clear the active session |
-| `/api/analysis/stream` | `GET` | Initial analysis / report SSE |
-| `/api/chat` | `POST` | Submit a user message |
-| `/api/chat/stream` | `GET` | Follow-up answer SSE |
+| `/api/repo/validate` | `POST` | 仅校验输入 |
+| `/api/repo` | `POST` | 创建会话并开始分析 |
+| `/api/session` | `GET` | 返回当前会话快照 |
+| `/api/session` | `DELETE` | 清除当前会话 |
+| `/api/analysis/stream` | `GET` | 初始分析 SSE |
+| `/api/chat` | `POST` | 提交追问 |
+| `/api/chat/stream` | `GET` | 追问回答 SSE |
+| `/api/sidecar/explain` | `POST` | 术语 sidecar 解释 |
 
-## Testing
-
-Backend:
-
-```bash
-pytest -q -p no:cacheprovider
-```
-
-If Windows temp permissions are problematic:
+## 测试
 
 ```bash
-pytest -q --basetemp pytest_tmp_run -p no:cacheprovider
+python -m pytest -q -p no:cacheprovider
 ```
 
-Legacy frontend prototype:
+如果 Windows 临时目录权限有噪音：
 
 ```bash
-cd frontend
-npm run build
+python -m pytest -q --basetemp pytest_tmp_run -p no:cacheprovider
 ```
 
-## Notes For Maintainers
+## 维护约束
 
-- Prefer `web_v2/` for current frontend work.
-- Use `web/` only when you need the legacy static frontend, and `frontend/` only for the older React prototype.
-- The backend should provide navigation help, not static teaching conclusions.
-- Claims about entry points, flow, layering, or dependency sources must be backed by source-tool evidence or explicitly marked as uncertain.
-- Some older design docs may still mention `m3` / `m4`. Treat the current code and this README as the source of truth for the live runtime.
+- 以后新增文档时，优先更新 `docs/` 三件套，而不是继续堆叠平行 spec。
+- 如果代码与文档冲突，以当前 `backend/` 与 `web_v3/` 实现为准，再回写文档。
+- 不要把 `web/`、`web_v2/`、`new_docs/` 当作当前产品事实来源。

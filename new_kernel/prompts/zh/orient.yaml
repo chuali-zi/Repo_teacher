@@ -1,0 +1,1 @@
+# OrientPlanner 提示词：system + user_template，注入 question / repo_overview / previous_covered / tool_descriptions，输出严格 JSON 的 reading_plan。

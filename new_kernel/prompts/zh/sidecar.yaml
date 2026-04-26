@@ -1,0 +1,1 @@
+# SidecarExplainer 提示词：system + user_template，注入 term / current_repo / current_file，输出 2-3 句中文术语解释。

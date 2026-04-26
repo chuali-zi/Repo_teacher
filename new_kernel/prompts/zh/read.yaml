@@ -1,0 +1,1 @@
+# ReadingAgent 提示词：system + user_template，注入 question / current_step / step_history / previous_steps / tools_description，输出严格 JSON {thought, action, action_input, self_note}。

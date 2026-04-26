@@ -1,7 +1,7 @@
 [project]
 name = "repo-tutor"
 version = "0.1.0"
-description = "Repo Tutor scaffold generated from docs/CURRENT_SPEC.md v3 documents."
+description = "Evidence-first repository tutoring runtime."
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.110",
@@ -24,4 +24,3 @@ target-version = "py311"
 [tool.pytest.ini_options]
 testpaths = ["backend/tests"]
 pythonpath = ["."]
-

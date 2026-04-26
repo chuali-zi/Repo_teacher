@@ -19,7 +19,8 @@
       "Bash(pushd /c/Users/chual/vibe/Irene/web)",
       "Bash(popd)",
       "Bash(python3 *)",
-      "Bash(powershell.exe *)"
+      "Bash(powershell.exe *)",
+      "Bash(xargs grep *)"
     ]
   }
 }

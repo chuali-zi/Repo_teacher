@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//c/Users/chual/vibe/Irene/**)",
+      "Bash(python -m py_compile new_kernel/llm/client.py new_kernel/tools/tool_protocol.py new_kernel/tools/safe_paths.py new_kernel/prompts/prompt_manager.py)",
+      "Bash(echo \"compile exit: $?\")",
+      "Bash(python -c ' *)"
+    ]
+  }
+}

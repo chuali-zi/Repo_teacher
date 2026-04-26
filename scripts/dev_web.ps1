@@ -1,4 +1,4 @@
-# Repo Tutor - start default frontend only
+# Repo Tutor - start default web_v3 frontend only
 # Usage: .\scripts\dev_web.ps1
 
 $ErrorActionPreference = 'Stop'
@@ -29,11 +29,12 @@ if (-not $PSScriptRoot) {
     $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 }
 
-$WebDir = Join-Path $Root 'web_v2'
+$WebDir = Join-Path $Root 'web_v3'
 $IndexFile = Join-Path $WebDir 'index.html'
+$FrontendPort = 5181
 
 if (-not (Test-Path $IndexFile)) {
-    Write-Host '[ERROR] web_v2\index.html not found' -ForegroundColor Red
+    Write-Host '[ERROR] web_v3\index.html not found' -ForegroundColor Red
     Write-Host "Checked: $IndexFile"
     Read-Host 'Press Enter to exit'
     exit 1
@@ -41,8 +42,8 @@ if (-not (Test-Path $IndexFile)) {
 
 Write-Host ''
 Write-Host '  =============================================' -ForegroundColor DarkYellow
-Write-Host '    Repo Tutor - Pixel Frontend' -ForegroundColor Yellow
-Write-Host "    http://localhost:5180" -ForegroundColor Cyan
+Write-Host '    Repo Tutor - Pixel Frontend v3' -ForegroundColor Yellow
+Write-Host "    http://localhost:$FrontendPort" -ForegroundColor Cyan
 Write-Host "    Serving: $WebDir" -ForegroundColor DarkGray
 Write-Host '  =============================================' -ForegroundColor DarkYellow
 Write-Host ''
@@ -50,13 +51,13 @@ Write-Host '  Note: backend must be started separately (scripts\dev_backend.cmd)
 Write-Host '  Press Ctrl+C to stop' -ForegroundColor DarkGray
 Write-Host ''
 
-Assert-PortFree -Port 5180 -Label 'the frontend endpoint'
+Assert-PortFree -Port $FrontendPort -Label 'the frontend endpoint'
 
-Start-Process 'http://localhost:5180'
+Start-Process "http://localhost:$FrontendPort"
 
 Push-Location $WebDir
 try {
-    python -m http.server 5180 --bind 127.0.0.1
+    python -m http.server $FrontendPort --bind 127.0.0.1
 } finally {
     Pop-Location
 }

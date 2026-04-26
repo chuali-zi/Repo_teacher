@@ -17,7 +17,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="Repo Tutor",
         version="0.1.0",
-        description="Scaffold following docs/CURRENT_SPEC.md v3 contracts.",
+        description="Evidence-first repository tutoring backend.",
     )
     app.add_middleware(
         CORSMiddleware,
