@@ -91,12 +91,22 @@ class ToolDefinition:
 
 
 @dataclass(frozen=True)
+class ToolAlias:
+    """Alternative action name exposed to the reading agent."""
+
+    name: str
+    description: str = ""
+    input_format: str = ""
+
+
+@dataclass(frozen=True)
 class ToolPromptHints:
     """Optional hint bundle for prompt composition."""
 
     short_description: str = ""
     when_to_use: str = ""
     input_format: str = ""
+    aliases: tuple[ToolAlias, ...] = ()
 
 
 @dataclass
@@ -183,12 +193,12 @@ class BaseTool(ABC):
         """Return LLM-facing definition for this tool."""
 
     @abstractmethod
-    async def execute(self, *, ctx: ToolContext, **kwargs: Any) -> ToolResult:
+    async def execute(self, *, ctx: ToolContext) -> ToolResult:
         """
         Execute tool with explicit context.
 
-        Runtime context must be passed as `ctx` only; do not inject `repo_root`
-        or pagination values through ad-hoc kwargs.
+        Concrete tools add their own keyword-only parameters, but runtime
+        context must be passed as `ctx` only.
         """
 
     def get_prompt_hints(self, language: str = DEFAULT_LANGUAGE) -> ToolPromptHints:
@@ -196,14 +206,31 @@ class BaseTool(ABC):
         definition = self.get_definition()
         return ToolPromptHints(short_description=definition.description)
 
+    @property
+    def name(self) -> str:
+        return self.get_definition().name
+
 
 class ToolRuntimeProtocol(Protocol):
     """Protocol for ToolRuntime-like wrappers."""
 
-    def get_definition(self) -> ToolDefinition:
+    @property
+    def valid_actions(self) -> frozenset[str]:
         ...
 
-    async def execute(self, *, ctx: ToolContext, **kwargs: Any) -> ToolResult:
+    async def execute(
+        self,
+        action: str,
+        action_input: dict[str, Any],
+        *,
+        ctx: ToolContext,
+    ) -> ToolResult:
+        ...
+
+    def build_planner_description(self) -> str:
+        ...
+
+    def build_reader_description(self) -> str:
         ...
 
 
@@ -212,6 +239,7 @@ __all__ = [
     "DEFAULT_LANGUAGE",
     "DEFAULT_MAX_LINES",
     "DEFAULT_MAX_SEARCH_HITS",
+    "ToolAlias",
     "ToolContext",
     "ToolDefinition",
     "ToolParameter",

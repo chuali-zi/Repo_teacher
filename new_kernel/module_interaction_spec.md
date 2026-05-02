@@ -161,7 +161,8 @@ contracts
 - `events` 不知道 FastAPI、SSE 字符串、session store、agent、repo 或 tools。
 - 内部模块发布的是 `contracts.SseEvent` 子类，不发布 JSON 字符串。
 - `api/sse.py` 是唯一把事件转成 `text/event-stream` 的地方。
-- 业务模块如果需要发事件，接收一个 event sink/factory/tracker 参数，不直接寻找全局 bus。
+- 业务模块如果需要发事件，接收一个 `EventSink` protocol 参数（仅含 `emit(event: SseEvent)` 一个方法），不直接寻找全局 bus。
+- `EventFactory`、`AgentStatusTracker`、`EventBus` 是 events 内部实现：业务模块只见 `EventSink` 和 `AgentStatusTracker`（后者作为高层 helper），不直接持有 `EventBus` 或 `EventFactory`。
 
 ### `session/`
 
@@ -265,8 +266,9 @@ contracts
 - 工具不能写文件、不能执行代码、不能联网、不能安装依赖。
 - 工具不能发布事件，不能写 scratchpad，不能生成可见回答。
 - 工具失败返回 `ToolResult(success=false, error_code=...)`，不让单次失败终止 turn。
-- `summarize_file` 如果需要 LLM，必须通过构造参数或 `ToolContext` 传入 summarizer callable；
-  不能 import `llm.client` 或 `BaseAgent`。
+- `summarize_file` 如果需要 LLM，必须通过构造参数注入 `summarizer: Callable[[str], Awaitable[str]]`；
+  禁止把 callable 放进 `ToolContext`（`ToolContext` 是不可变值对象，注入 callable 会破坏可序列化与可缓存性），
+  禁止 import `llm.client` 或 `BaseAgent`。注入由组合根 (`api/app.py`) 完成。
 
 ### `memory/`
 
@@ -337,19 +339,22 @@ POST /api/v4/repositories
   -> SessionStore.create_session()
   -> route/composition root starts repo.parse_pipeline with:
        session_id
-       explicit repo input
-       event sink / status tracker
-       result callback or state writer
-  -> repo pipeline emits ParseLogLine through EventFactory/EventBus
+       explicit repo input (input_value / branch / mode)
+       status_sink:    Callable[[AgentStatus],     MaybeAwaitable[None]]
+       log_sink:       Callable[[ParseLogLine],    MaybeAwaitable[None]]
+       connected_sink: Callable[[RepoConnectedData], MaybeAwaitable[None]]
+  -> 三个 sink 各自把对象交给上层 orchestrator；上层负责
+        (a) 写入 SessionState 对应字段
+        (b) 通过 EventFactory + EventSink 广播为对应 SseEvent 子类
   -> repo pipeline returns RepoParseResult
   -> owner updates SessionState.repository / current_code / parse_log / agent_status
-  -> EventFactory creates RepoConnectedEvent
   -> api/sse.py streams events to frontend
 ```
 
 禁止：
 
 - `repo.parse_pipeline` 自己从 `SessionStore` 查 session。
+- `repo.parse_pipeline` 自己 import `events` 模块或自己构造 SseEvent；事件构造由 sink 的上层 orchestrator 完成。
 - `api` 自己扫描文件树。
 - `events` 根据 event 反向修改 session。
 
@@ -538,7 +543,7 @@ Tool -> ApiEnvelope
 | `turn/*` | `contracts`, `session.session_state`, `events.*`, `agents.teaching_loop`, `deep_research.deep_research_loop`, `turn.cancellation` |
 | `agents/*` | `contracts`, `llm.client`, `prompts.prompt_manager`, `memory.scratchpad`, `tools.tool_protocol`, `tools.tool_runtime` |
 | `deep_research/*` | `contracts`, `agents.teacher`, `agents.reading_agent`, `memory.scratchpad`, `tools.tool_protocol`, `tools.tool_runtime` |
-| `repo/*` | `contracts`, `events.event_factory`, `events.agent_status_tracker`, `tools.safe_paths` |
+| `repo/*` | `contracts`, `tools.safe_paths`（事件通过传入的 sink callable 发，不直接 import `events`） |
 | `session/*` | `contracts`, `events.event_bus`, `memory.scratchpad` |
 | `events/*` | `contracts` |
 | `tools/*` | `tools.tool_protocol`, `tools.safe_paths`, stdlib file/search helpers |

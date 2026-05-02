@@ -1,1 +1,11 @@
-# HTTP 路由集合：每个文件实现 contracts.HTTP_ENDPOINTS 中的一组相关端点。
+"""HTTP route modules for the v4 API."""
+
+__all__ = [
+    "agent",
+    "chat",
+    "control",
+    "github",
+    "repositories",
+    "session",
+    "sidecar",
+]

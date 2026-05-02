@@ -4,7 +4,28 @@
       "Read(//c/Users/chual/vibe/Irene/**)",
       "Bash(python -m py_compile new_kernel/llm/client.py new_kernel/tools/tool_protocol.py new_kernel/tools/safe_paths.py new_kernel/prompts/prompt_manager.py)",
       "Bash(echo \"compile exit: $?\")",
-      "Bash(python -c ' *)"
+      "Bash(python -c ' *)",
+      "Bash(python -m compileall -q new_kernel)",
+      "Bash(echo \"compileall exit: $?\")",
+      "Bash(python new_kernel/_smoke_phase12.py)",
+      "Bash(PYTHONPATH=. python new_kernel/_smoke_phase12.py)",
+      "Bash(xargs wc *)",
+      "Bash(PYTHONPATH=. python -m compileall -q new_kernel/llm/client.py new_kernel/api/app.py)",
+      "Bash(PYTHONPATH=. python new_kernel/_smoke_llm_config.py)",
+      "Bash(PYTHONPATH=. python -m compileall -q new_kernel)",
+      "Bash(PYTHONPATH=. python new_kernel/_smoke_regression.py)",
+      "Bash(echo \"exit=$?\")",
+      "Bash(PYTHONPATH=. python -m uvicorn new_kernel.api.app:app --host 127.0.0.1 --port 8000 --log-level warning)",
+      "Bash(curl -s -X POST http://127.0.0.1:8000/api/v4/github/resolve -H \"Content-Type: application/json\" -d '{\"input_value\":\"octocat/Hello-World\"}')",
+      "Bash(curl -s -i http://127.0.0.1:8000/api/v4/agent/status?session_id=missing)",
+      "Bash(taskkill //F //IM python.exe)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://127.0.0.1:8000/api/v4/agent/status?session_id=missing)",
+      "Bash(curl -s http://127.0.0.1:8000/api/v4/agent/status?session_id=missing)",
+      "Bash(curl -s -X POST http://127.0.0.1:8000/api/v4/repositories -H \"Content-Type: application/json\" -d '{\"input_value\":\"octocat/Hello-World\",\"branch\":null,\"mode\":\"chat\"}')",
+      "Bash(python -c \"import sys,json;d=json.load\\(sys.stdin\\);print\\('session ok:', d['ok']\\); print\\('repository.status:', \\(d.get\\('data'\\) or {}\\).get\\('repository',{}\\).get\\('status'\\) if d.get\\('data'\\) else None\\)\")",
+      "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\chual\\\\vibe\\\\Irene\\\\new_kernel\" -Recurse -Directory)",
+      "Bash(Select-Object -ExpandProperty FullName)",
+      "Bash(xargs grep *)"
     ]
   }
 }
