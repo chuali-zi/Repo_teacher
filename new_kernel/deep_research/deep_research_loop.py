@@ -20,6 +20,7 @@ import inspect
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
@@ -41,7 +42,7 @@ from .agents.decomposer import Decomposer
 from .agents.investigator import Investigator
 from .agents.note_taker import NoteTaker
 from .investigation_policy import InvestigationPolicy
-from .research_scratchpad import SubtopicMeta
+from .research_scratchpad import SubtopicMeta, SubtopicNote
 from .triage import TriageDecision, triage
 
 
@@ -91,31 +92,85 @@ class _StringOverview:
 
 
 def _make_overview_proxy(repo_overview: str) -> _StringOverview:
-    """Parse ``primary_language`` / ``file_count`` lines out of the overview text."""
+    """Parse the structured fields ``triage()`` / Decomposer read from overview text.
+
+    Beyond ``primary_language`` / ``file_count``, this also parses the YAML-style
+    sub-blocks emitted by ``repo/overview_builder.py`` (``- top_level_paths:`` and
+    ``- entry_candidates:``) so the Decomposer's anchor reachability check has
+    real data to work with. Missing sub-blocks leave the fields as empty lists
+    (RECON-D §A1 / RECON-B Severity-3).
+    """
 
     text = repo_overview or ""
     primary: str | None = None
     file_count = 0
+    top_level_paths: list[str] = []
+    entry_candidates: list[Any] = []
+    current_block: str | None = None
     for raw_line in text.splitlines():
-        line = raw_line.strip()
+        line = raw_line.rstrip()
+        stripped = line.lstrip()
+        # Sub-block headers — note these themselves start with "- " at the
+        # top-level indent; check for them before treating "- " as a generic
+        # block terminator.
+        if stripped.startswith("- top_level_paths:"):
+            current_block = "paths"
+            continue
+        if stripped.startswith("- entry_candidates:"):
+            current_block = "entries"
+            continue
+        # 2-space indented "  - <value>" rows belong to the current sub-block.
+        if current_block == "paths" and line.startswith("  - "):
+            value = line[4:].strip()
+            if value and len(top_level_paths) < 60:
+                top_level_paths.append(value)
+            continue
+        if current_block == "entries" and line.startswith("  - "):
+            value = line[4:].strip()
+            if value and len(entry_candidates) < 12:
+                path, lang, reason = _parse_entry_candidate_line(value)
+                entry_candidates.append(
+                    SimpleNamespace(path=path, language=lang, reason=reason)
+                )
+            continue
+        # A new top-level "- " line (or a blank line) closes any open sub-block.
+        if line.startswith("- ") or not line.strip():
+            current_block = None
+        # Top-level scalar fields.
         if line.startswith("- "):
-            line = line[2:].strip()
-        if line.startswith("primary_language:"):
-            value = line.split(":", 1)[1].strip()
-            if value and value.lower() not in {"none", "null", "unknown"}:
-                primary = value
-        elif line.startswith("file_count:"):
-            value = line.split(":", 1)[1].strip()
-            try:
-                file_count = int(value)
-            except ValueError:
-                file_count = 0
+            scalar = line[2:].strip()
+            if scalar.startswith("primary_language:"):
+                value = scalar.split(":", 1)[1].strip()
+                if value and value.lower() not in {"none", "null", "unknown"}:
+                    primary = value
+            elif scalar.startswith("file_count:"):
+                value = scalar.split(":", 1)[1].strip()
+                try:
+                    file_count = int(value)
+                except ValueError:
+                    file_count = 0
     if file_count <= 0:
         # Keep file_count >= 1 so triage doesn't raise EmptyRepositoryError for
         # repos that just lack the field; an empty repo would have already been
         # rejected upstream by the parse pipeline.
         file_count = 1
-    return _StringOverview(text=text, primary_language=primary, file_count=file_count)
+    proxy = _StringOverview(text=text, primary_language=primary, file_count=file_count)
+    proxy.top_level_paths = top_level_paths
+    proxy.entry_candidates = entry_candidates
+    return proxy
+
+
+def _parse_entry_candidate_line(value: str) -> tuple[str, str | None, str | None]:
+    """Parse "<path> (<lang>): <reason>" → (path, lang, reason); tolerant of variants."""
+
+    if "(" in value and "):" in value:
+        head, _, tail = value.partition(" (")
+        lang_part, _, reason_part = tail.partition("): ")
+        path = head.strip() or value
+        lang = lang_part.strip() or None
+        reason = reason_part.strip() or None
+        return path, lang, reason
+    return value, None, None
 
 
 class DeepResearchLoop:
@@ -263,8 +318,41 @@ class DeepResearchLoop:
                 current_target=subtopic.title,
             )
 
+            # RECON-D Option B: for the arch sub-topic specifically, run one
+            # deterministic ``list_dir(".")`` and persist it as the round-1
+            # ``raw_observation`` plus a prefab teacher-tone note. This guarantees
+            # the Composer always sees the top-level directory listing without
+            # touching any LLM prompt; ReAct rounds 2+ proceed normally on top of
+            # the seeded scratchpad. Cost actually drops vs the old path because
+            # we skip one NoteTaker LLM call.
+            arch_pre_seeded = False
+            if subtopic.id == "arch":
+                pre_result = await self._tool_runtime.execute(
+                    "list_dir", {"path": "."}, ctx=ctx
+                )
+                await _add_metrics(status_tracker, tool_call=1)
+                if getattr(pre_result, "success", False):
+                    raw_text = (getattr(pre_result, "content", None) or "")[:1800]
+                    prefab_text = (
+                        "我们先扫了一眼仓库的顶层布局，看看一共分了几大块：\n" + raw_text
+                    )
+                    prefab_note = SubtopicNote(
+                        text=prefab_text[:600],
+                        success=True,
+                        anchor_path=".",
+                        anchor_lines=None,
+                    )
+                    scratchpad.add_note(
+                        subtopic.id,
+                        1,
+                        prefab_note,
+                        raw_observation=getattr(pre_result, "content", None),
+                    )
+                    arch_pre_seeded = True
+
             policy.reset_failure()
-            for round_idx in range(1, policy.round_quota() + 1):
+            start_round = 2 if arch_pre_seeded else 1
+            for round_idx in range(start_round, policy.round_quota() + 1):
                 cancellation_token.raise_if_cancelled()
                 decision_io = await self._investigator.process(
                     subtopic=subtopic,

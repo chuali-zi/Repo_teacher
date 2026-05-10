@@ -37,6 +37,21 @@ _DEFAULT_ANCHORS_STANDARD: dict[str, tuple[str, ...]] = {
 }
 
 
+def _arch_default_anchors(reachable: tuple[str, ...]) -> tuple[str, ...]:
+    """Pick the first up-to-6 directory-like reachable paths as arch anchors.
+
+    Used as the dynamic default for the ``arch`` sub-topic when the LLM didn't
+    return any reachable anchors (RECON-D Option A). A directory-like path ends
+    with ``/``; if the overview contains fewer than 2 such paths, fall back to
+    whatever ``reachable`` exposes (best-effort; empty tuple is valid).
+    """
+
+    dirs = tuple(path for path in reachable if path.endswith("/"))
+    if len(dirs) >= 2:
+        return dirs[:6]
+    return tuple(reachable[:6])
+
+
 class Decomposer(BaseResearchAgent):
     """Plan the sub-topic list for Phase 2; one LLM call, deterministic fallback."""
 
@@ -78,7 +93,7 @@ class Decomposer(BaseResearchAgent):
                 max_tokens=900,
             )
         except Exception:
-            return _fallback_subtopics(report_shape)
+            return _fallback_subtopics(report_shape, reachable=reachable)
         payload = self.parse_strict_json(text, fallback={"subtopics": []})
         raw_items = payload.get("subtopics") if isinstance(payload, dict) else None
 
@@ -88,7 +103,7 @@ class Decomposer(BaseResearchAgent):
             reachable=reachable,
             multilingual=_multilingual(language_counts),
         )
-        return validated or _fallback_subtopics(report_shape)
+        return validated or _fallback_subtopics(report_shape, reachable=reachable)
 
 
 def _multilingual(language_counts: dict[str, int]) -> bool:
@@ -179,23 +194,46 @@ def _validate_subtopics(
         return [by_id["what"]] + ([by_id["stack"]] if "stack" in by_id else [])
 
     # Standard branch: fill missing pillars with defaults; allow polyglot iff multilingual.
-    result: list[SubtopicMeta] = [
-        by_id.get(
-            sid,
-            SubtopicMeta(id=sid, title=_DEFAULT_TITLES[sid], anchors=_DEFAULT_ANCHORS_STANDARD[sid]),
-        )
-        for sid in _STANDARD_REQUIRED
-    ]
+    result: list[SubtopicMeta] = []
+    for sid in _STANDARD_REQUIRED:
+        existing = by_id.get(sid)
+        if existing is None:
+            anchors = _default_anchors_for(sid, reachable)
+            result.append(SubtopicMeta(id=sid, title=_DEFAULT_TITLES[sid], anchors=anchors))
+            continue
+        # RECON-D Option A: when the LLM produced an arch sub-topic but every
+        # anchor was unreachable (so anchors_raw was filtered down to ()), inject
+        # the dynamic default so Investigator still sees concrete paths.
+        if sid == "arch" and not existing.anchors and reachable:
+            anchors = _arch_default_anchors(reachable)
+            if anchors:
+                result.append(SubtopicMeta(id=sid, title=existing.title, anchors=anchors))
+                continue
+        result.append(existing)
     if "polyglot" in by_id and multilingual:
         result.append(by_id["polyglot"])
     return result
 
 
-def _fallback_subtopics(report_shape: Literal["short", "standard"]) -> list[SubtopicMeta]:
+def _default_anchors_for(sid: str, reachable: tuple[str, ...]) -> tuple[str, ...]:
+    """Return the default anchor tuple for a missing standard pillar."""
+
+    if sid == "arch":
+        return _arch_default_anchors(reachable)
+    return _DEFAULT_ANCHORS_STANDARD.get(sid, ())
+
+
+def _fallback_subtopics(
+    report_shape: Literal["short", "standard"],
+    *,
+    reachable: tuple[str, ...] = (),
+) -> list[SubtopicMeta]:
     if report_shape == "short":
         return [SubtopicMeta(id="what", title=_DEFAULT_TITLES["what"], anchors=("README.md",))]
     return [
-        SubtopicMeta(id=sid, title=_DEFAULT_TITLES[sid], anchors=_DEFAULT_ANCHORS_STANDARD[sid])
+        SubtopicMeta(
+            id=sid, title=_DEFAULT_TITLES[sid], anchors=_default_anchors_for(sid, reachable)
+        )
         for sid in _STANDARD_REQUIRED
     ]
 

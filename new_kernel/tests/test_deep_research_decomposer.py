@@ -184,7 +184,11 @@ def test_decomposer_invalid_json_falls_back_to_defaults_standard() -> None:
     assert anchor_map["what"] == ("README.md",)
     assert anchor_map["stack"] == ("README.md",)
     assert anchor_map["why"] == ("README.md",)
-    assert anchor_map["arch"] == ()
+    # FIX-03 RECON-D Option A: arch's default is now derived from
+    # ``top_level_paths`` (directory entries first, capped at 6). The fake
+    # overview exposes ``["README.md", "src/", "tests/", "package.json"]``;
+    # ``_arch_default_anchors`` keeps ``("src/", "tests/")``.
+    assert anchor_map["arch"] == ("src/", "tests/")
     assert anchor_map["flow"] == ()
 
 
@@ -256,7 +260,9 @@ def test_decomposer_falls_back_to_default_pillars_on_llm_exception() -> None:
     ]
     anchor_map = {meta.id: meta.anchors for meta in result}
     assert anchor_map["what"] == ("README.md",)
-    assert anchor_map["arch"] == ()
+    # FIX-03 RECON-D Option A: arch's dynamic default uses ``top_level_paths``
+    # filtered to directory entries (``src/`` + ``tests/`` here).
+    assert anchor_map["arch"] == ("src/", "tests/")
     # And we did call the LLM exactly once (then the fallback fired, no retry loop).
     assert _RaisingLLMClient.calls == 1
 

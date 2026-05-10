@@ -355,8 +355,11 @@ def test_turn_runtime_start_turn_deep_lazy_inits_research_scratchpad_and_complet
     # Decomposer / composer were invoked at least once.
     assert any(call["kind"] == "decompose" for call in llm_client.call_log)
     assert llm_client.stream_log, "Composer.stream_llm must have been called"
-    # Investigator returned 'done' immediately, so tool runtime stays untouched.
-    assert tool_runtime.execute_calls == []
+    # Investigator returned 'done' immediately, but the arch pre-seed still
+    # invokes ``list_dir`` once (RECON-D Option B). The stub runtime only knows
+    # ``read_file_range``, so the seed call returns a failure ToolResult and no
+    # prefab note lands in the scratchpad.
+    assert [call["action"] for call in tool_runtime.execute_calls] == ["list_dir"]
 
 
 def test_turn_runtime_start_turn_chat_uses_teaching_scratchpad() -> None:

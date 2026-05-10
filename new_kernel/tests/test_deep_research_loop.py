@@ -356,8 +356,12 @@ def test_loop_emits_expected_event_sequence() -> None:
     assert len(deltas) >= 1
     assert len(ends) == 1
 
-    # Investigator says done → tool runtime never invoked.
-    assert tool_runtime.execute_calls == []
+    # Investigator says done for every sub-topic. The tool runtime is still
+    # invoked exactly once for the arch pre-seed (RECON-D Option B); since the
+    # default ``_StubToolRuntime`` only knows ``read_file_range`` it returns
+    # failure and the prefab seed is silently skipped.
+    assert [call["action"] for call in tool_runtime.execute_calls] == ["list_dir"]
+    assert tool_runtime.execute_calls[0]["action_input"] == {"path": "."}
 
     # Last DeepResearchProgressEvent must be an investigate event before stream_start.
     progress_indices = [
@@ -554,6 +558,204 @@ def test_loop_satisfies_turnloop_protocol_signature() -> None:
         assert "ChatMessage" in return_anno
     else:
         assert return_anno is ChatMessage
+
+
+def test_arch_subtopic_pre_seeds_list_dir_into_scratchpad() -> None:
+    """RECON-D Option B: arch sub-topic must always pre-seed ``list_dir(.)``.
+
+    The deterministic pre-step persists the raw output as the round-1
+    ``raw_observation`` and writes a teacher-tone prefab note in front of the
+    LLM-driven ReAct loop, so the Composer always sees the top-level directory
+    listing without depending on Investigator's choices.
+    """
+
+    fake_listing = (
+        "[dir]  api/\n"
+        "[dir]  deep_research/\n"
+        "[dir]  tools/\n"
+        "[file] README.md (123 bytes)"
+    )
+
+    class _StubRuntimeWithListDir:
+        """Like ``_StubToolRuntime`` but also handles ``list_dir``."""
+
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict[str, Any]]] = []
+            self._actions = frozenset(("read_file_range", "list_dir", "done"))
+
+        @property
+        def valid_actions(self) -> frozenset[str]:
+            return self._actions
+
+        async def execute(self, action: str, action_input: dict, *, ctx: Any) -> ToolResult:
+            self.calls.append((action, dict(action_input)))
+            if action == "list_dir":
+                return ToolResult.ok(fake_listing, metadata={"path": "."})
+            if action == "read_file_range":
+                return ToolResult.ok("# README\nfake body\n", metadata={})
+            return ToolResult.fail("unknown action", error_code="invalid_action")
+
+        def build_reader_description(self) -> str:
+            return (
+                "| Action | Input | When to use |\n"
+                "| --- | --- | --- |\n"
+                "| read_file_range | path | read source slice |\n"
+                "| list_dir | path | inspect directory |"
+            )
+
+    llm_client = _StubLLMClient(
+        decompose_response=_five_pillar_decompose_payload(),
+        investigate_response=_done_investigate_payload(),
+        note_response="not used",
+        compose_chunks=_standard_compose_chunks(),
+    )
+    pm = PromptManager(prompts_root=PROMPTS_ROOT)
+    runtime = _StubRuntimeWithListDir()
+    loop = DeepResearchLoop(
+        decomposer=Decomposer(llm_client=llm_client, prompt_manager=pm),
+        investigator=Investigator(llm_client=llm_client, prompt_manager=pm),
+        note_taker=NoteTaker(llm_client=llm_client, prompt_manager=pm),
+        composer=Composer(llm_client=llm_client, prompt_manager=pm),
+        tool_runtime=runtime,
+    )
+
+    scratchpad = ResearchScratchpad()
+    sink = _CapturingSink()
+    tracker = _StubStatusTracker()
+    token = CancellationToken(session_id="s_arch", turn_id="t_arch")
+
+    message = asyncio.run(
+        loop.run(
+            session_id="s_arch",
+            turn_id="t_arch",
+            user_message="seed",
+            scratchpad=scratchpad,
+            repo_overview=_STANDARD_OVERVIEW,
+            repo_root=Path("."),
+            sink=sink,
+            status_tracker=tracker,
+            cancellation_token=token,
+        )
+    )
+
+    # Exactly one list_dir(".") was issued for the arch pre-seed; no other
+    # tool calls happened (Investigator returned 'done' for every sub-topic).
+    list_dir_calls = [call for call in runtime.calls if call[0] == "list_dir"]
+    assert list_dir_calls == [("list_dir", {"path": "."})]
+    assert all(action != "read_file_range" for action, _ in runtime.calls)
+
+    # The raw listing was persisted as the arch's round-1 raw observation.
+    raw = scratchpad.first_round_raw("arch")
+    assert raw is not None
+    assert "[dir]  api/" in raw
+
+    # The prefab note opens with the teacher-tone preamble and contains the
+    # listing snippet.
+    arch_notes = scratchpad.notes_for("arch")
+    assert arch_notes, "arch sub-topic must have at least the prefab note"
+    assert arch_notes[0].text.startswith("我们先扫了一眼仓库的顶层布局")
+    assert "api/" in arch_notes[0].text
+    assert arch_notes[0].anchor_path == "."
+    assert arch_notes[0].success is True
+
+    # End-to-end behaviour preserved.
+    assert isinstance(message, ChatMessage)
+    assert message.kind == ReportKind.REPO_ONBOARDING
+
+
+def test_arch_pre_seed_skipped_when_subtopic_absent_short_branch() -> None:
+    """Short branch never has an ``arch`` sub-topic → no pre-seed, no list_dir."""
+
+    short_decompose = json.dumps(
+        {
+            "subtopics": [
+                {"id": "what", "title": "做了什么", "anchors": []},
+            ]
+        }
+    )
+    loop, _, runtime = _build_loop(
+        decompose_response=short_decompose,
+        investigate_response=_done_investigate_payload(),
+        note_response="not used",
+        compose_chunks=["短报告正文"],
+    )
+    scratchpad = ResearchScratchpad()
+    sink = _CapturingSink()
+    tracker = _StubStatusTracker()
+    token = CancellationToken(session_id="s_short", turn_id="t_short")
+
+    asyncio.run(
+        loop.run(
+            session_id="s_short",
+            turn_id="t_short",
+            user_message="seed",
+            scratchpad=scratchpad,
+            repo_overview=_SHORT_OVERVIEW,
+            repo_root=Path("."),
+            sink=sink,
+            status_tracker=tracker,
+            cancellation_token=token,
+        )
+    )
+
+    # ``list_dir`` must never have been invoked because the only sub-topic is
+    # ``what``; Investigator immediately returns done so no ReAct tool calls fire.
+    assert runtime.execute_calls == []
+
+
+def test_overview_proxy_parses_top_level_paths_from_text() -> None:
+    """RECON-D Option A1: ``_make_overview_proxy`` must populate the structured
+    fields from the YAML-style sub-blocks emitted by ``overview_builder``."""
+
+    from new_kernel.deep_research.deep_research_loop import _make_overview_proxy
+
+    overview_text = (
+        "repo_overview:\n"
+        "- primary_language: Python\n"
+        "- file_count: 17\n"
+        "- top_level_paths:\n"
+        "  - api/\n"
+        "  - deep_research/\n"
+        "  - tools/\n"
+        "  - README.md\n"
+        "- entry_candidates:\n"
+        "  - README.md (markdown): top-level readme\n"
+        "  - src/main.py (python): primary entry\n"
+    )
+
+    proxy = _make_overview_proxy(overview_text)
+
+    assert proxy.primary_language == "Python"
+    assert proxy.file_count == 17
+    assert proxy.top_level_paths == ["api/", "deep_research/", "tools/", "README.md"]
+    assert len(proxy.entry_candidates) == 2
+    paths = [entry.path for entry in proxy.entry_candidates]
+    assert paths == ["README.md", "src/main.py"]
+    languages = [entry.language for entry in proxy.entry_candidates]
+    assert languages == ["markdown", "python"]
+    reasons = [entry.reason for entry in proxy.entry_candidates]
+    assert reasons == ["top-level readme", "primary entry"]
+
+
+def test_overview_proxy_missing_sub_blocks_leaves_lists_empty() -> None:
+    """When ``top_level_paths`` / ``entry_candidates`` blocks are absent the
+    proxy must expose empty lists rather than raising. Also locks the original
+    minimal-overview behaviour kept across the FIX-03 refactor."""
+
+    from new_kernel.deep_research.deep_research_loop import _make_overview_proxy
+
+    overview_text = (
+        "repo_overview:\n"
+        "- primary_language: Python\n"
+        "- file_count: 42\n"
+    )
+
+    proxy = _make_overview_proxy(overview_text)
+
+    assert proxy.primary_language == "Python"
+    assert proxy.file_count == 42
+    assert proxy.top_level_paths == []
+    assert proxy.entry_candidates == []
 
 
 if __name__ == "__main__":  # pragma: no cover
