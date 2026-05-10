@@ -47,7 +47,10 @@
       "PowerShell(python -m compileall C:\\\\Users\\\\chual\\\\vibe\\\\Irene\\\\new_kernel\\\\deep_research C:\\\\Users\\\\chual\\\\vibe\\\\Irene\\\\new_kernel\\\\contracts.py C:\\\\Users\\\\chual\\\\vibe\\\\Irene\\\\new_kernel\\\\api\\\\app.py C:\\\\Users\\\\chual\\\\vibe\\\\Irene\\\\new_kernel\\\\api\\\\routes\\\\repositories.py 2>&1 | Select-Object -Last 30)",
       "Bash(python -m compileall -q new_kernel/deep_research/agents/decomposer.py)",
       "Bash(python -m compileall -q new_kernel/session new_kernel/turn new_kernel/deep_research)",
-      "Bash(python -m pytest -q new_kernel/tests/test_*.py --ignore=new_kernel/tests/tmp_run --ignore=new_kernel/tests/pytest_tmp_run)"
+      "Bash(python -m pytest -q new_kernel/tests/test_*.py --ignore=new_kernel/tests/tmp_run --ignore=new_kernel/tests/pytest_tmp_run)",
+      "Bash(python -m compileall -q new_kernel/deep_research new_kernel/turn)",
+      "PowerShell(python -m compileall new_kernel\\\\deep_research\\\\agents\\\\composer.py)",
+      "PowerShell(python -m compileall C:\\\\Users\\\\chual\\\\vibe\\\\Irene\\\\new_kernel\\\\deep_research\\\\agents\\\\composer.py)"
     ]
   }
 }

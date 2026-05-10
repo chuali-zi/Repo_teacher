@@ -38,17 +38,31 @@ _DEFAULT_ANCHORS_STANDARD: dict[str, tuple[str, ...]] = {
 
 
 def _arch_default_anchors(reachable: tuple[str, ...]) -> tuple[str, ...]:
-    """Pick the first up-to-6 directory-like reachable paths as arch anchors.
+    """Pick a mix of directory + file anchors (≤3 of each, ≤6 total).
 
-    Used as the dynamic default for the ``arch`` sub-topic when the LLM didn't
-    return any reachable anchors (RECON-D Option A). A directory-like path ends
-    with ``/``; if the overview contains fewer than 2 such paths, fall back to
-    whatever ``reachable`` exposes (best-effort; empty tuple is valid).
+    Directory anchors give the Investigator the high-level layout to ``list_dir``;
+    file anchors invite it to ``read_file_range`` a representative source file.
+    The two combined steer Phase 2 toward grounded source reading rather than
+    pure directory inference (RECON-E §D1, FIX-04).
     """
 
-    dirs = tuple(path for path in reachable if path.endswith("/"))
-    if len(dirs) >= 2:
-        return dirs[:6]
+    dirs: list[str] = []
+    files: list[str] = []
+    for path in reachable:
+        if not isinstance(path, str) or not path:
+            continue
+        if path.endswith("/"):
+            if len(dirs) < 3:
+                dirs.append(path)
+        else:
+            if len(files) < 3:
+                files.append(path)
+        if len(dirs) >= 3 and len(files) >= 3:
+            break
+    mixed = tuple(dirs + files)
+    if mixed:
+        return mixed
+    # Last resort: take whatever's there.
     return tuple(reachable[:6])
 
 

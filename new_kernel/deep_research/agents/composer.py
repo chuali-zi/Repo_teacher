@@ -111,7 +111,13 @@ class Composer(BaseResearchAgent):
             user_prompt,
             system_prompt=self.get_prompt("system"),
             temperature=0.7,
-            max_tokens=4000,
+            # AGENTS.md §7.2 targets 3500-5000 中文字符. DeepSeek-chat tokenizes
+            # Chinese roughly 1 char ≈ 1 token, so 4000 was just at the edge and
+            # the report would be cut off mid-paragraph (FIX-07). 8000 leaves
+            # plenty of headroom for the body + the trailing <<SUGGESTIONS>>
+            # block + Markdown overhead, and stays inside DeepSeek-chat's
+            # 8192 output cap.
+            max_tokens=8000,
         )
         async for chunk in stream:
             if not chunk:

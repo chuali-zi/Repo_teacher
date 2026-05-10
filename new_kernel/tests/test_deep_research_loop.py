@@ -758,5 +758,186 @@ def test_overview_proxy_missing_sub_blocks_leaves_lists_empty() -> None:
     assert proxy.entry_candidates == []
 
 
+def test_arch_prefab_note_has_drill_target_when_entry_candidates_present() -> None:
+    """RECON-E §D3 / FIX-05: when overview surfaces non-markdown entry candidates,
+    the arch prefab note must end with a teacher-tone nudge that names a specific
+    file path (back-ticked) so the round-2 Investigator drills into source code
+    instead of running another ``list_dir``."""
+
+    fake_listing = (
+        "[dir]  api/\n"
+        "[dir]  deep_research/\n"
+        "[dir]  tools/\n"
+        "[file] README.md (123 bytes)"
+    )
+
+    class _StubRuntimeWithListDir:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict[str, Any]]] = []
+            self._actions = frozenset(("read_file_range", "list_dir", "done"))
+
+        @property
+        def valid_actions(self) -> frozenset[str]:
+            return self._actions
+
+        async def execute(self, action: str, action_input: dict, *, ctx: Any) -> ToolResult:
+            self.calls.append((action, dict(action_input)))
+            if action == "list_dir":
+                return ToolResult.ok(fake_listing, metadata={"path": "."})
+            if action == "read_file_range":
+                return ToolResult.ok("# README\nfake body\n", metadata={})
+            return ToolResult.fail("unknown action", error_code="invalid_action")
+
+        def build_reader_description(self) -> str:
+            return "| Action | Input | When to use |\n| --- | --- | --- |\n"
+
+    overview_with_entries = (
+        "repo_overview:\n"
+        "- primary_language: Python\n"
+        "- file_count: 42\n"
+        "- top_level_paths:\n"
+        "  - api/\n"
+        "  - tools/\n"
+        "  - src/\n"
+        "- entry_candidates:\n"
+        "  - README.md (markdown): top-level readme\n"
+        "  - src/main.py (python): primary entry\n"
+    )
+
+    llm_client = _StubLLMClient(
+        decompose_response=_five_pillar_decompose_payload(),
+        investigate_response=_done_investigate_payload(),
+        note_response="not used",
+        compose_chunks=_standard_compose_chunks(),
+    )
+    pm = PromptManager(prompts_root=PROMPTS_ROOT)
+    runtime = _StubRuntimeWithListDir()
+    loop = DeepResearchLoop(
+        decomposer=Decomposer(llm_client=llm_client, prompt_manager=pm),
+        investigator=Investigator(llm_client=llm_client, prompt_manager=pm),
+        note_taker=NoteTaker(llm_client=llm_client, prompt_manager=pm),
+        composer=Composer(llm_client=llm_client, prompt_manager=pm),
+        tool_runtime=runtime,
+    )
+
+    scratchpad = ResearchScratchpad()
+    sink = _CapturingSink()
+    tracker = _StubStatusTracker()
+    token = CancellationToken(session_id="s_d3", turn_id="t_d3")
+
+    asyncio.run(
+        loop.run(
+            session_id="s_d3",
+            turn_id="t_d3",
+            user_message="seed",
+            scratchpad=scratchpad,
+            repo_overview=overview_with_entries,
+            repo_root=Path("."),
+            sink=sink,
+            status_tracker=tracker,
+            cancellation_token=token,
+        )
+    )
+
+    arch_notes = scratchpad.notes_for("arch")
+    assert arch_notes, "arch sub-topic must have at least the prefab note"
+    note_text = arch_notes[0].text
+    # Drill-target points at the first non-markdown entry candidate.
+    assert "`src/main.py`" in note_text
+    # Teacher-tone nudge sentence must be present verbatim.
+    assert "挑一个具体地方往里走一步" in note_text
+    # Hard cap preserved.
+    assert len(note_text) <= 600
+    # No banned tool jargon.
+    for banned in ("工具", "ToolResult", "tool_call", "JSON", "list_dir", "read_file_range", "search_repo"):
+        assert banned not in note_text, f"prefab note must not mention {banned!r}"
+
+
+def test_arch_prefab_note_skips_nudge_when_no_target_available() -> None:
+    """When ``entry_candidates`` is empty AND ``top_level_paths`` only holds
+    directories (all endswith '/'), ``_pick_arch_drill_target`` returns None and
+    the nudge sentence must NOT be appended — graceful skip per FIX-05 priority 4.
+    """
+
+    fake_listing = (
+        "[dir]  api/\n"
+        "[dir]  tools/"
+    )
+
+    class _StubRuntimeWithListDir:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict[str, Any]]] = []
+            self._actions = frozenset(("read_file_range", "list_dir", "done"))
+
+        @property
+        def valid_actions(self) -> frozenset[str]:
+            return self._actions
+
+        async def execute(self, action: str, action_input: dict, *, ctx: Any) -> ToolResult:
+            self.calls.append((action, dict(action_input)))
+            if action == "list_dir":
+                return ToolResult.ok(fake_listing, metadata={"path": "."})
+            if action == "read_file_range":
+                return ToolResult.ok("# README\nfake body\n", metadata={})
+            return ToolResult.fail("unknown action", error_code="invalid_action")
+
+        def build_reader_description(self) -> str:
+            return "| Action | Input | When to use |\n| --- | --- | --- |\n"
+
+    overview_dirs_only = (
+        "repo_overview:\n"
+        "- primary_language: Python\n"
+        "- file_count: 42\n"
+        "- top_level_paths:\n"
+        "  - api/\n"
+        "  - tools/\n"
+    )
+
+    llm_client = _StubLLMClient(
+        decompose_response=_five_pillar_decompose_payload(),
+        investigate_response=_done_investigate_payload(),
+        note_response="not used",
+        compose_chunks=_standard_compose_chunks(),
+    )
+    pm = PromptManager(prompts_root=PROMPTS_ROOT)
+    runtime = _StubRuntimeWithListDir()
+    loop = DeepResearchLoop(
+        decomposer=Decomposer(llm_client=llm_client, prompt_manager=pm),
+        investigator=Investigator(llm_client=llm_client, prompt_manager=pm),
+        note_taker=NoteTaker(llm_client=llm_client, prompt_manager=pm),
+        composer=Composer(llm_client=llm_client, prompt_manager=pm),
+        tool_runtime=runtime,
+    )
+
+    scratchpad = ResearchScratchpad()
+    sink = _CapturingSink()
+    tracker = _StubStatusTracker()
+    token = CancellationToken(session_id="s_d3b", turn_id="t_d3b")
+
+    asyncio.run(
+        loop.run(
+            session_id="s_d3b",
+            turn_id="t_d3b",
+            user_message="seed",
+            scratchpad=scratchpad,
+            repo_overview=overview_dirs_only,
+            repo_root=Path("."),
+            sink=sink,
+            status_tracker=tracker,
+            cancellation_token=token,
+        )
+    )
+
+    arch_notes = scratchpad.notes_for("arch")
+    assert arch_notes, "arch sub-topic must have the prefab note even without nudge"
+    note_text = arch_notes[0].text
+    # The seed itself still landed (preamble present)…
+    assert note_text.startswith("我们先扫了一眼仓库的顶层布局")
+    # …but the nudge is gracefully skipped.
+    assert "挑一个具体地方往里走一步" not in note_text
+    # No back-ticked path appears either (sanity check).
+    assert "`" not in note_text
+
+
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-q"]))

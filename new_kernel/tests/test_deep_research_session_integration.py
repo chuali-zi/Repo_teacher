@@ -337,7 +337,11 @@ def test_turn_runtime_start_turn_deep_lazy_inits_research_scratchpad_and_complet
     assert isinstance(state.research_scratchpad, ResearchScratchpad)
     assert len(state.research_scratchpad.subtopics) == 5
 
-    # Teaching scratchpad must NOT have been touched.
+    # Teaching scratchpad: the SAME object (FIX-01 split is preserved), but
+    # since FIX-06 it now carries bridged onboarding evidence — the legacy
+    # "must NOT have been touched" claim no longer applies. The detailed
+    # bridge contract is exercised in
+    # ``test_after_deep_turn_teaching_scratchpad_has_covered_points`` below.
     assert isinstance(state.teaching_scratchpad, Scratchpad)
     assert state.scratchpad is state.teaching_scratchpad
 
@@ -416,3 +420,159 @@ def test_turn_runtime_start_turn_chat_uses_teaching_scratchpad() -> None:
     assert assistant.role == "assistant"
     assert ChatMode(assistant.mode) == ChatMode.CHAT
     assert state.active_turn_id is None
+
+
+def test_after_deep_turn_teaching_scratchpad_has_covered_points() -> None:
+    """FIX-06: the bridge must promote onboarding evidence into the teaching pad.
+
+    AGENTS.md §5 promises: "onboarding 完成后保留全部 sub-topic 笔记 +
+    covered_points, 供后续 TeachingLoop 引用". With the standard 5-pillar
+    branch, exactly 5 covered_points must land — one per sub-topic — each
+    tagged with the ``[onboarding]`` prefix so the next chat turn's
+    OrientPlanner can recognise them as onboarding-derived (vs. accumulated
+    by the chat itself in later turns).
+    """
+
+    deep_loop, _llm_client, _tool_runtime = _build_deep_loop()
+
+    store = SessionStore(
+        event_bus_factory=EventBus,
+        idle_status_factory=_idle_status,
+    )
+    teaching_loop = _ExplodingTeachingLoop()
+    turn_runtime = TurnRuntime(
+        teaching_loop=teaching_loop,
+        deep_loop=deep_loop,
+        idle_status_factory=_idle_status,
+    )
+
+    state = store.create(session_id="sess_bridge_after_deep")
+    state.repository = _ready_repository()
+    state.repo_root = Path(".")
+    state.current_code = None
+
+    async def _runner() -> None:
+        await turn_runtime.start_turn(
+            state=state,
+            request=SendTeachingMessageRequest(
+                message="请生成入门导读。",
+                mode=ChatMode.DEEP,
+                report_kind=ReportKind.REPO_ONBOARDING,
+            ),
+            initiator="system",
+        )
+        task = turn_runtime.active_task(state.session_id)
+        assert task is not None
+        await asyncio.wait_for(task, timeout=5.0)
+
+    asyncio.run(_runner())
+
+    # Research pad still holds the 5 pillars from the standard branch.
+    assert state.research_scratchpad is not None
+    assert len(state.research_scratchpad.subtopics) == 5
+
+    # Bridge populated the teaching pad: 5 covered_points, one per sub-topic.
+    teaching = state.teaching_scratchpad
+    assert isinstance(teaching, Scratchpad)
+    assert teaching.covered_points, "bridge must promote covered_points"
+    assert len(teaching.covered_points) == 5, (
+        f"expected 5 onboarding points (one per pillar), got {len(teaching.covered_points)}: "
+        f"{list(teaching.covered_points)}"
+    )
+    for summary in teaching.covered_points.values():
+        assert summary.startswith("[onboarding]"), (
+            f"covered_point summary must be tagged: {summary!r}"
+        )
+
+    # Synthetic ReadEntry per pillar so TeacherAgent's evidence context can
+    # reference the onboarding step ids next turn.
+    onboarding_step_ids = {
+        entry.step_id
+        for entry in teaching.read_entries
+        if entry.step_id.startswith("onboarding/")
+    }
+    assert onboarding_step_ids == {
+        "onboarding/what",
+        "onboarding/stack",
+        "onboarding/why",
+        "onboarding/arch",
+        "onboarding/flow",
+    }
+
+
+def test_bridge_is_idempotent_across_two_deep_turns() -> None:
+    """A second successful deep turn must NOT double the bridged covered_points.
+
+    The bridge keys covered_points by ``onboarding:<sub.id>`` and read_entries
+    by ``onboarding/<sub.id>``; running it twice over the same research
+    scratchpad must idempotently overwrite, not append. Both deep turns share
+    a single asyncio.run/event-loop so TurnRuntime's per-session ``asyncio.Lock``
+    in ``_locks`` stays valid for the second start_turn call.
+    """
+
+    deep_loop, _llm_client, _tool_runtime = _build_deep_loop()
+
+    store = SessionStore(
+        event_bus_factory=EventBus,
+        idle_status_factory=_idle_status,
+    )
+    teaching_loop = _ExplodingTeachingLoop()
+    turn_runtime = TurnRuntime(
+        teaching_loop=teaching_loop,
+        deep_loop=deep_loop,
+        idle_status_factory=_idle_status,
+    )
+
+    state = store.create(session_id="sess_bridge_idempotent")
+    state.repository = _ready_repository()
+    state.repo_root = Path(".")
+    state.current_code = None
+
+    captured: dict[str, Any] = {}
+
+    async def _run_one_deep_turn() -> None:
+        await turn_runtime.start_turn(
+            state=state,
+            request=SendTeachingMessageRequest(
+                message="请生成入门导读。",
+                mode=ChatMode.DEEP,
+                report_kind=ReportKind.REPO_ONBOARDING,
+            ),
+            initiator="system",
+        )
+        task = turn_runtime.active_task(state.session_id)
+        assert task is not None
+        await asyncio.wait_for(task, timeout=5.0)
+
+    async def _runner() -> None:
+        # Turn 1.
+        await _run_one_deep_turn()
+        teaching = state.teaching_scratchpad
+        captured["first_count"] = len(teaching.covered_points)
+        captured["first_keys"] = set(teaching.covered_points.keys())
+        captured["first_step_ids"] = {
+            entry.step_id
+            for entry in teaching.read_entries
+            if entry.step_id.startswith("onboarding/")
+        }
+        # Turn 2 in the SAME event loop so per-session asyncio.Lock stays valid.
+        await _run_one_deep_turn()
+
+    asyncio.run(_runner())
+
+    teaching = state.teaching_scratchpad
+    second_count = len(teaching.covered_points)
+    second_keys = set(teaching.covered_points.keys())
+    second_step_ids = {
+        entry.step_id
+        for entry in teaching.read_entries
+        if entry.step_id.startswith("onboarding/")
+    }
+    assert captured["first_count"] == 5
+    assert second_count == captured["first_count"], (
+        f"bridge must be idempotent: 1st={captured['first_count']} 2nd={second_count}"
+    )
+    assert second_keys == captured["first_keys"]
+    assert second_step_ids == captured["first_step_ids"]
+    # Synthetic onboarding entries must not pile up.
+    assert len(second_step_ids) == 5

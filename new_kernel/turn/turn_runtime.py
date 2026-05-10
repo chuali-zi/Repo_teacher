@@ -365,6 +365,15 @@ class TurnRuntime:
             )
             cancellation_token.raise_if_cancelled()
             assistant_message = _normalize_assistant_message(assistant_message, mode)
+            if mode == ChatMode.DEEP:
+                # Bridge onboarding evidence into the teaching pad so the next
+                # chat turn's OrientPlanner / TeacherAgent can reuse it
+                # (AGENTS.md §5 contract). Opportunistic: a bridge failure must
+                # never demote a successful onboarding to a failed turn.
+                try:
+                    _bridge_research_to_teaching(state)
+                except Exception:
+                    pass
             completed_status = await self._mark_completed(status_tracker)
             cancellation_token.raise_if_cancelled()
 
@@ -717,6 +726,85 @@ def _select_scratchpad(state: TurnSessionState, mode: ChatMode) -> Any:
     if teaching_pad is not None:
         return teaching_pad
     return state.scratchpad
+
+
+def _bridge_research_to_teaching(state: TurnSessionState) -> None:
+    """Promote completed onboarding evidence into the teaching scratchpad.
+
+    Implements ``deep_research/AGENTS.md`` §5 (broken since FIX-01). TurnRuntime
+    is the legal SessionState writer (``module_interaction_spec.md §11.2``).
+    Idempotent: covered_points keyed ``onboarding:<sub.id>``, ReadEntry keyed
+    ``onboarding/<sub.id>`` (pre-stripped before re-add).
+    """
+
+    research = getattr(state, "research_scratchpad", None)
+    teaching = getattr(state, "teaching_scratchpad", None) or getattr(
+        state, "scratchpad", None
+    )
+    if research is None or teaching is None:
+        return
+    subtopics = getattr(research, "subtopics", ()) or ()
+    if not subtopics:
+        return
+    notes_for = getattr(research, "notes_for", None)
+    skip_of = getattr(research, "skip_reason", None)
+    entries = getattr(teaching, "read_entries", None)
+
+    for sub in subtopics:
+        sub_id = getattr(sub, "id", None)
+        if not sub_id:
+            continue
+        sub_title = getattr(sub, "title", None) or sub_id
+        notes = notes_for(sub_id) if callable(notes_for) else ()
+        skip_reason = skip_of(sub_id) if callable(skip_of) else None
+        if notes:
+            body = "\n\n".join(
+                getattr(n, "text", "") for n in notes if getattr(n, "text", "")
+            )[:1800] or sub_title
+        elif skip_reason:
+            body = f"该支柱在 onboarding 阶段已跳过：{skip_reason}"
+        else:
+            body = sub_title
+        summary = f"[onboarding] {sub_title}: {body}"[:300]
+        step_id = f"onboarding/{sub_id}"
+
+        # covered_points: stable key idempotency via dict / fallback APIs.
+        point_id = f"onboarding:{sub_id}"
+        for write in (
+            lambda: teaching.update_covered_points(point_id, summary),
+            lambda: teaching.add_covered_point(summary),
+        ):
+            try:
+                write()
+                break
+            except Exception:
+                continue
+        else:
+            container = getattr(teaching, "covered_points", None)
+            if isinstance(container, dict):
+                container[point_id] = summary
+            elif isinstance(container, list):
+                container.append(summary)
+
+        # Synthetic ReadEntry: pre-strip same step_id, then re-add.
+        if isinstance(entries, list):
+            entries[:] = [e for e in entries if getattr(e, "step_id", None) != step_id]
+        add = getattr(teaching, "add_entry", None)
+        if not callable(add):
+            continue
+        try:
+            add(
+                step_id=step_id,
+                round_index=1,
+                thought="onboarding 阶段已总结",
+                action="summarize_onboarding",
+                action_input={"anchors": list(getattr(sub, "anchors", ()) or ())},
+                observation=body,
+                self_note="onboarding 阶段已覆盖该支柱",
+                tool_success=True,
+            )
+        except Exception:
+            pass
 
 
 def _repo_overview(state: TurnSessionState) -> str:

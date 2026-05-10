@@ -173,6 +173,36 @@ def _parse_entry_candidate_line(value: str) -> tuple[str, str | None, str | None
     return value, None, None
 
 
+def _pick_arch_drill_target(overview: Any) -> str | None:
+    """Pick the most representative source file for the arch ReAct round to read.
+
+    Priority (RECON-E §D3, FIX-05):
+      1. First entry_candidate whose language is not markdown/plaintext.
+      2. First entry_candidate of any language.
+      3. First reachable top_level path that is file-like (not endswith('/')).
+      4. None — caller skips the nudge.
+    """
+
+    entries = list(getattr(overview, "entry_candidates", ()) or ())
+    for entry in entries:
+        path = getattr(entry, "path", None)
+        lang = getattr(entry, "language", None)
+        if not isinstance(path, str) or not path:
+            continue
+        if lang and str(lang).lower() in {"markdown", "plaintext", "text"}:
+            continue
+        return path
+    for entry in entries:
+        path = getattr(entry, "path", None)
+        if isinstance(path, str) and path:
+            return path
+    paths = list(getattr(overview, "top_level_paths", ()) or ())
+    for path in paths:
+        if isinstance(path, str) and path and not path.endswith("/"):
+            return path
+    return None
+
+
 class DeepResearchLoop:
     """Run one onboarding turn through the four-phase research pipeline.
 
@@ -263,6 +293,7 @@ class DeepResearchLoop:
             subtopics=subtopics,
             scratchpad=scratchpad,
             repo_overview_text=overview_obj.text,
+            repo_overview_obj=overview_obj,
             repo_root=repo_root,
             session_id=session_id,
             turn_id=turn_id,
@@ -290,6 +321,7 @@ class DeepResearchLoop:
         subtopics: list[SubtopicMeta],
         scratchpad: Any,
         repo_overview_text: str,
+        repo_overview_obj: Any = None,
         repo_root: Path,
         session_id: str,
         turn_id: str,
@@ -333,9 +365,23 @@ class DeepResearchLoop:
                 await _add_metrics(status_tracker, tool_call=1)
                 if getattr(pre_result, "success", False):
                     raw_text = (getattr(pre_result, "content", None) or "")[:1800]
-                    prefab_text = (
-                        "我们先扫了一眼仓库的顶层布局，看看一共分了几大块：\n" + raw_text
-                    )
+                    # RECON-E §D3 / FIX-05: pick a concrete file path to point
+                    # the round-2 Investigator toward source reading. We reserve
+                    # ~180 chars at the tail for the nudge so the listing portion
+                    # is capped at 420 chars BEFORE the nudge gets appended;
+                    # whole prefab still fits the existing 600-char hard cap.
+                    nudge_target = _pick_arch_drill_target(repo_overview_obj)
+                    listing_cap = 420 if nudge_target else 600
+                    head = "我们先扫了一眼仓库的顶层布局，看看一共分了几大块：\n"
+                    listing_room = max(0, listing_cap - len(head))
+                    prefab_text = head + raw_text[:listing_room]
+                    if nudge_target:
+                        nudge = (
+                            f"\n\n挑一个具体地方往里走一步：我们先打开 `{nudge_target}` "
+                            f"看一段，把这块代码长什么样、关键 symbol 是啥、和上下游怎么连，"
+                            f"摆到学生面前。"
+                        )
+                        prefab_text += nudge[:180]
                     prefab_note = SubtopicNote(
                         text=prefab_text[:600],
                         success=True,

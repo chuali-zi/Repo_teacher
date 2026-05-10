@@ -184,11 +184,11 @@ def test_decomposer_invalid_json_falls_back_to_defaults_standard() -> None:
     assert anchor_map["what"] == ("README.md",)
     assert anchor_map["stack"] == ("README.md",)
     assert anchor_map["why"] == ("README.md",)
-    # FIX-03 RECON-D Option A: arch's default is now derived from
-    # ``top_level_paths`` (directory entries first, capped at 6). The fake
-    # overview exposes ``["README.md", "src/", "tests/", "package.json"]``;
-    # ``_arch_default_anchors`` keeps ``("src/", "tests/")``.
-    assert anchor_map["arch"] == ("src/", "tests/")
+    # FIX-04 RECON-E §D1: arch's default mixes ≤3 dirs + ≤3 files (≤6 total)
+    # so the Investigator sees both list-able directories AND read-able files.
+    # The fake overview exposes ``["README.md", "src/", "tests/", "package.json"]``;
+    # ``_arch_default_anchors`` keeps ``("src/", "tests/", "README.md", "package.json")``.
+    assert anchor_map["arch"] == ("src/", "tests/", "README.md", "package.json")
     assert anchor_map["flow"] == ()
 
 
@@ -260,11 +260,68 @@ def test_decomposer_falls_back_to_default_pillars_on_llm_exception() -> None:
     ]
     anchor_map = {meta.id: meta.anchors for meta in result}
     assert anchor_map["what"] == ("README.md",)
-    # FIX-03 RECON-D Option A: arch's dynamic default uses ``top_level_paths``
-    # filtered to directory entries (``src/`` + ``tests/`` here).
-    assert anchor_map["arch"] == ("src/", "tests/")
+    # FIX-04 RECON-E §D1: arch's dynamic default now mixes dirs + files;
+    # given ``["README.md", "src/", "tests/", "package.json"]`` the result is
+    # ``("src/", "tests/", "README.md", "package.json")`` — dirs first.
+    assert anchor_map["arch"] == ("src/", "tests/", "README.md", "package.json")
     # And we did call the LLM exactly once (then the fallback fired, no retry loop).
     assert _RaisingLLMClient.calls == 1
+
+
+def test_arch_default_anchors_mixes_dirs_and_files() -> None:
+    """FIX-04 RECON-E §D1: ``_arch_default_anchors`` returns ≤3 dirs + ≤3 files,
+    dirs before files, capped at 6 — gives Investigator both list-able and
+    read-able paths so it doesn't fall back to pure ``list_dir`` chains."""
+
+    from new_kernel.deep_research.agents.decomposer import _arch_default_anchors
+
+    reachable = ("api/", "deep_research/", "tools/", "memory/",
+                 "README.md", "pyproject.toml", "setup.py")
+    result = _arch_default_anchors(reachable)
+
+    assert any(p.endswith("/") for p in result), "must include >=1 directory"
+    assert any(not p.endswith("/") for p in result), "must include >=1 file"
+    assert len(result) <= 6, f"capped at 6 anchors, got {len(result)}"
+    # Dirs must precede files (structure-first ordering).
+    last_dir = max(i for i, p in enumerate(result) if p.endswith("/"))
+    first_file = min(i for i, p in enumerate(result) if not p.endswith("/"))
+    assert last_dir < first_file, f"dirs must come before files: {result}"
+
+
+def test_arch_default_anchors_falls_back_when_no_files() -> None:
+    """Dir-only reachable degrades gracefully (entry_candidates absent case)."""
+
+    from new_kernel.deep_research.agents.decomposer import _arch_default_anchors
+
+    assert _arch_default_anchors(("api/", "deep_research/")) == ("api/", "deep_research/")
+
+
+def test_decomposer_validate_subtopics_arch_anchors_include_files_when_overview_has_them() -> None:
+    """End-to-end: with entry_candidates files in the overview, the fallback
+    arch sub-topic now exposes >=1 file anchor so Investigator can read source."""
+
+    from types import SimpleNamespace
+
+    overview = _FakeOverview(
+        top_level_paths=["api/", "lib/"],
+        entry_candidates=[
+            SimpleNamespace(path="README.md", language="markdown", reason="readme"),
+            SimpleNamespace(path="src/main.py", language="python", reason="entry"),
+        ],
+    )
+    result = _run(
+        _make_decomposer(json.dumps({})).process(
+            report_shape="standard", repo_overview=overview,
+        )
+    )
+
+    arch = next(meta for meta in result if meta.id == "arch")
+    assert any(not a.endswith("/") for a in arch.anchors), (
+        f"arch anchors must include >=1 file path, got {arch.anchors}"
+    )
+    assert "README.md" in arch.anchors or "src/main.py" in arch.anchors, (
+        f"expected an entry_candidate file in arch anchors, got {arch.anchors}"
+    )
 
 
 if __name__ == "__main__":  # pragma: no cover
