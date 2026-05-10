@@ -9,6 +9,8 @@
 <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
 <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
 <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/marked@13.0.3/marked.min.js" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/dompurify@3.2.4/dist/purify.min.js" crossorigin="anonymous"></script>
 <style>
   *{box-sizing:border-box;margin:0;padding:0}
   html,body{width:100%;height:100%;overflow:hidden}
@@ -32,6 +34,51 @@
   input,button,textarea{font-family:'JetBrains Mono','Courier New',monospace}
   input:focus{outline:none}
   button:focus{outline:none}
+  /* ── MARKDOWN (.md) — Catppuccin Mocha ──────────────────────────── */
+  .md{color:#bac2de;font-size:12px;line-height:1.7}
+  .md > *:first-child{margin-top:0}
+  .md > *:last-child{margin-bottom:0}
+  .md p{margin:5px 0}
+  .md h1,.md h2,.md h3,.md h4,.md h5,.md h6{
+    font-weight:700;letter-spacing:.04em;margin:9px 0 4px;
+    font-family:'JetBrains Mono','Courier New',monospace;
+  }
+  .md h1{color:#cba6f7;font-size:14px}
+  .md h2{color:#89dceb;font-size:13px}
+  .md h3{color:#a6e3a1;font-size:12.5px}
+  .md h4,.md h5,.md h6{color:#f9e2af;font-size:12px}
+  .md h1::before{content:"# ";color:#585b70}
+  .md h2::before{content:"## ";color:#585b70}
+  .md h3::before{content:"### ";color:#585b70}
+  .md h4::before{content:"#### ";color:#585b70}
+  .md strong{color:#f9e2af;font-weight:700}
+  .md em{color:#fab387;font-style:italic}
+  .md del{color:#6c7086;text-decoration:line-through}
+  .md a{color:#89dceb;text-decoration:underline;text-underline-offset:2px}
+  .md a:hover{text-shadow:0 0 6px #89dceb55}
+  .md ul,.md ol{padding-left:18px;margin:4px 0}
+  .md li{margin:2px 0}
+  .md ul > li::marker{color:#94e2d5}
+  .md ol > li::marker{color:#94e2d5}
+  .md ul li input[type="checkbox"]{accent-color:#a6e3a1;margin-right:4px}
+  .md blockquote{border-left:2px solid #89dceb;padding:3px 9px;margin:6px 0;color:#a6adc8;background:#11111b66}
+  .md hr{border:none;border-top:1px dashed #45475a;margin:8px 0}
+  .md code{background:#313244;color:#fab387;padding:1px 4px;border-radius:2px;font-family:'JetBrains Mono','Courier New',monospace;font-size:11px}
+  .md pre{margin:0;padding:0;background:transparent}
+  .md .md-code{margin:7px 0;background:#11111b;border:1px solid #313244;border-left:2px solid #a6e3a1;overflow:hidden}
+  .md .md-code-h{background:#181825;color:#a6e3a1;font-size:9px;padding:2px 9px;letter-spacing:.08em;border-bottom:1px solid #313244}
+  .md .md-code-b{padding:6px 0;overflow-x:auto;max-width:100%}
+  .md .md-code-line{display:flex;line-height:1.65;font-size:11px}
+  .md .md-code-line .md-ln{color:#45475a;user-select:none;min-width:28px;text-align:right;padding:0 8px 0 6px;flex-shrink:0;font-size:10px}
+  .md .md-code-line .md-cl{white-space:pre;padding-right:10px;flex:1;font-family:'JetBrains Mono','Courier New',monospace}
+  .md .md-code-line .md-cl span{font-family:inherit}
+  .md table{border-collapse:collapse;margin:6px 0;font-size:11px;display:block;overflow-x:auto;max-width:100%}
+  .md th,.md td{border:1px solid #313244;padding:3px 7px;text-align:left}
+  .md th{background:#181825;color:#cba6f7;font-weight:700}
+  .md tbody tr:nth-child(odd){background:#181825aa}
+  .md img{max-width:100%;border:1px solid #313244}
+  .md.md-fallback{white-space:pre-wrap;word-break:break-word;font-family:'JetBrains Mono','Courier New',monospace;color:#bac2de}
+  .md.md-fallback::before{content:"\25C6 raw";display:inline-block;color:#fab387;font-size:9px;letter-spacing:.1em;background:#fab38722;padding:1px 5px;margin-bottom:3px}
 </style>
 </head>
 <body>
@@ -49,6 +96,142 @@ const C = {
   red:     '#f38ba8', mauve:   '#cba6f7', blue:     '#89b4fa',
   teal:    '#94e2d5', peach:   '#fab387', pink:     '#f5c2e7',
 };
+
+const LEFT_PANEL_DEFAULT_WIDTH = 162;
+const LEFT_PANEL_MIN_WIDTH = 140;
+const LEFT_PANEL_MAX_WIDTH = 320;
+const RIGHT_PANEL_DEFAULT_WIDTH = 258;
+const RIGHT_PANEL_MIN_WIDTH = 220;
+const RIGHT_PANEL_MAX_WIDTH = 520;
+
+const clamp = (value, min, max) => Math.max(min, Math.min(value, max));
+
+// ── MARKDOWN RENDERER (content-protection first) ─────────────────────
+const escapeHtml = (s) => String(s)
+  .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+  .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+
+const _wordCount = (s) => {
+  try { return (String(s).match(/[\p{L}\p{N}]+/gu) || []).length; }
+  catch (_) { return (String(s).match(/[A-Za-z0-9_]+/g) || []).length; }
+};
+
+// Mirrors CodeViewer.tokenize (further down) but emits HTML strings.
+// Adds Python keywords on top of the JS/TS set the right-side viewer uses.
+const TOKEN_RE = /('(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|`(?:[^`\\]|\\.)*`|\b(?:const|let|var|function|class|interface|type|return|if|else|while|for|new|this|import|export|default|extends|implements|private|public|async|await|void|null|undefined|true|false|def|lambda|yield|elif|pass|raise|with|as|in|is|not|and|or|from|global|nonlocal|try|except|finally)\b|\b\d+(?:\.\d+)?\b)/g;
+
+function tokenizeLineToHtml(line) {
+  if (!line) return '&nbsp;';
+  const trimmed = line.trimStart();
+  if (trimmed.startsWith('//') || trimmed.startsWith('#') ||
+      trimmed.startsWith('*') || trimmed.startsWith('/*')) {
+    return `<span style="color:${C.comment}">${escapeHtml(line)}</span>`;
+  }
+  let out = ''; let last = 0; let m;
+  TOKEN_RE.lastIndex = 0;
+  while ((m = TOKEN_RE.exec(line)) !== null) {
+    if (m.index > last) out += `<span style="color:${C.text}">${escapeHtml(line.slice(last, m.index))}</span>`;
+    const tok = m[0];
+    let col = C.mauve;
+    if (/^['"`]/.test(tok)) col = C.green;
+    else if (/^\d/.test(tok)) col = C.peach;
+    out += `<span style="color:${col}">${escapeHtml(tok)}</span>`;
+    last = m.index + tok.length;
+  }
+  if (last < line.length) out += `<span style="color:${C.text}">${escapeHtml(line.slice(last))}</span>`;
+  return out || '&nbsp;';
+}
+
+// Configure marked once at module load. Wrapped in a guard so a broken/missing
+// CDN never poisons the React tree — if anything fails here, renderMarkdownSafe
+// just hits its catch path and falls back to plain text.
+(function configureMarked() {
+  try {
+    if (!window.marked) return;
+    const Renderer = window.marked.Renderer;
+    if (!Renderer) return;
+    const renderer = new Renderer();
+    renderer.code = function(code, lang) {
+      const raw = typeof code === 'string' ? code : (code && code.text != null ? code.text : '');
+      const langStr = typeof lang === 'string' ? lang : (lang && lang.lang != null ? lang.lang : '');
+      const lines = raw.split('\n');
+      if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop();
+      const body = lines.map((l, i) =>
+        `<div class="md-code-line">` +
+          `<span class="md-ln">${i + 1}</span>` +
+          `<span class="md-cl">${tokenizeLineToHtml(l)}</span>` +
+        `</div>`
+      ).join('');
+      const head = langStr ? `<div class="md-code-h">${escapeHtml(langStr)}</div>` : '';
+      return `<div class="md-code">${head}<div class="md-code-b">${body}</div></div>`;
+    };
+    try {
+      window.marked.use({ renderer, gfm: true, breaks: true, pedantic: false });
+    } catch (_) {
+      window.marked.setOptions({ renderer, gfm: true, breaks: true });
+    }
+  } catch (err) {
+    console.warn('[md] configureMarked failed:', err);
+  }
+  try {
+    if (window.DOMPurify && typeof window.DOMPurify.addHook === 'function') {
+      window.DOMPurify.addHook('afterSanitizeAttributes', (node) => {
+        if (node && node.tagName === 'A') {
+          node.setAttribute('target', '_blank');
+          node.setAttribute('rel', 'noopener noreferrer');
+        }
+      });
+    }
+  } catch (err) {
+    console.warn('[md] DOMPurify hook failed:', err);
+  }
+})();
+
+function renderMarkdownSafe(text) {
+  if (text == null || text === '') return { html: '', fallback: false };
+  const fallback = (reason) => ({
+    html: escapeHtml(text).replace(/\n/g, '<br>'),
+    fallback: true,
+    reason,
+  });
+  if (!window.marked || !window.DOMPurify) return fallback('no_lib');
+  const inputWords = _wordCount(text);
+  try {
+    const dirty = window.marked.parse(text);
+    const clean = window.DOMPurify.sanitize(dirty, {
+      ALLOWED_ATTR: [
+        'href','src','alt','title','target','rel','class','style',
+        'colspan','rowspan','start','type','checked','disabled',
+      ],
+    });
+    if (typeof clean !== 'string' || clean.length === 0) {
+      return fallback('empty_output');
+    }
+    if (inputWords > 0) {
+      const probe = document.createElement('div');
+      probe.innerHTML = clean;
+      const renderedWords = _wordCount(probe.textContent || '');
+      if (renderedWords < Math.floor(inputWords * 0.7)) {
+        return fallback('content_loss');
+      }
+    }
+    return { html: clean, fallback: false };
+  } catch (err) {
+    console.warn('[md] render failed, falling back to plain text:', err);
+    return fallback('exception');
+  }
+}
+
+function MarkdownView({ content }) {
+  const result = useMemo(() => renderMarkdownSafe(content || ''), [content]);
+  return (
+    <div
+      className={`md${result.fallback ? ' md-fallback' : ''}`}
+      data-md-fallback={result.fallback ? (result.reason || '1') : undefined}
+      dangerouslySetInnerHTML={{ __html: result.html }}
+    />
+  );
+}
 
 // ── AGENT STATE CONFIG ────────────────────────────────────────────────
 const AGENT_STATES = {
@@ -512,6 +695,7 @@ function GlossaryPanel({ sessionId }) {
 function MsgBubble({ msg }) {
   const isUser = msg.role === 'user';
   const isSystem = msg.role === 'system';
+  const useMarkdown = msg.role === 'assistant' && !msg.color;
   return (
     <div className="scan-in" style={{
       marginBottom: 10,
@@ -531,9 +715,12 @@ function MsgBubble({ msg }) {
         borderLeft: !isUser && !isSystem ? `2px solid ${C.cyan}` : undefined,
         color: msg.color || (isUser ? C.text : C.sub1),
         fontSize: '12px', lineHeight: 1.7,
-        whiteSpace: 'pre-wrap',
+        whiteSpace: useMarkdown ? 'normal' : 'pre-wrap',
+        wordBreak: 'break-word',
       }}>
-        {msg.content}
+        {useMarkdown
+          ? <MarkdownView content={msg.content || ''} />
+          : msg.content}
       </div>
     </div>
   );
@@ -544,9 +731,23 @@ function ChatPanel({ messages, onSend, parseState, parseLog, mode, setMode, onPa
   const [input, setInput] = useState('');
   const chatRef = useRef(null);
   const endRef = useRef(null);
+  const stickToBottomRef = useRef(true);
 
   useEffect(() => {
-    if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
+    const el = chatRef.current;
+    if (!el) return;
+    const onScroll = () => {
+      const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+      stickToBottomRef.current = distanceFromBottom < 40;
+    };
+    el.addEventListener('scroll', onScroll, { passive: true });
+    return () => el.removeEventListener('scroll', onScroll);
+  }, []);
+
+  useEffect(() => {
+    if (stickToBottomRef.current && chatRef.current) {
+      chatRef.current.scrollTop = chatRef.current.scrollHeight;
+    }
   }, [messages, parseLog]);
 
   const send = () => {
@@ -972,8 +1173,38 @@ function App() {
   const [callCount, setCalls]   = useState(0);
   const [tokenCount, setTokens] = useState(0);
   const [currentActivity, setCurrentActivity] = useState(null);
+  const [leftPanelWidth, setLeftPanelWidth] = useState(LEFT_PANEL_DEFAULT_WIDTH);
+  const [isLeftPanelResizing, setIsLeftPanelResizing] = useState(false);
+  const [isLeftPanelHandleHovering, setIsLeftPanelHandleHovering] = useState(false);
+  const [rightPanelWidth, setRightPanelWidth] = useState(RIGHT_PANEL_DEFAULT_WIDTH);
+  const [isRightPanelResizing, setIsRightPanelResizing] = useState(false);
+  const [isRightPanelHandleHovering, setIsRightPanelHandleHovering] = useState(false);
   const streamClosers = useRef({ repo: null, chat: null });
   const activeAssistantId = useRef(null);
+
+  const clampLeftPanelWidth = useCallback((width) => {
+    return clamp(width, LEFT_PANEL_MIN_WIDTH, LEFT_PANEL_MAX_WIDTH);
+  }, []);
+
+  const clampRightPanelWidth = useCallback((width) => {
+    const viewportMax = Math.floor(window.innerWidth * 0.5);
+    const maxWidth = Math.max(RIGHT_PANEL_MIN_WIDTH, Math.min(RIGHT_PANEL_MAX_WIDTH, viewportMax));
+    return clamp(width, RIGHT_PANEL_MIN_WIDTH, maxWidth);
+  }, []);
+
+  const beginLeftPanelResize = useCallback((event) => {
+    event.preventDefault();
+    setIsRightPanelResizing(false);
+    setIsLeftPanelResizing(true);
+    setLeftPanelWidth(clampLeftPanelWidth(event.clientX));
+  }, [clampLeftPanelWidth]);
+
+  const beginRightPanelResize = useCallback((event) => {
+    event.preventDefault();
+    setIsLeftPanelResizing(false);
+    setIsRightPanelResizing(true);
+    setRightPanelWidth(clampRightPanelWidth(window.innerWidth - event.clientX));
+  }, [clampRightPanelWidth]);
 
   const closeStream = useCallback((kind) => {
     if (streamClosers.current[kind]) {
@@ -1240,6 +1471,74 @@ function App() {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [applyAgentStatus, sessionId]);
 
+  useEffect(() => {
+    if (!isRightPanelResizing) return;
+
+    const previousUserSelect = document.body.style.userSelect;
+    const previousCursor = document.body.style.cursor;
+    document.body.style.userSelect = 'none';
+    document.body.style.cursor = 'col-resize';
+
+    const updateWidth = (event) => {
+      setRightPanelWidth(clampRightPanelWidth(window.innerWidth - event.clientX));
+    };
+    const stopResize = () => setIsRightPanelResizing(false);
+
+    window.addEventListener('pointermove', updateWidth);
+    window.addEventListener('pointerup', stopResize);
+    window.addEventListener('pointercancel', stopResize);
+
+    return () => {
+      document.body.style.userSelect = previousUserSelect;
+      document.body.style.cursor = previousCursor;
+      window.removeEventListener('pointermove', updateWidth);
+      window.removeEventListener('pointerup', stopResize);
+      window.removeEventListener('pointercancel', stopResize);
+    };
+  }, [clampRightPanelWidth, isRightPanelResizing]);
+
+  useEffect(() => {
+    if (!isLeftPanelResizing) return;
+
+    const previousUserSelect = document.body.style.userSelect;
+    const previousCursor = document.body.style.cursor;
+    document.body.style.userSelect = 'none';
+    document.body.style.cursor = 'col-resize';
+
+    const updateWidth = (event) => {
+      setLeftPanelWidth(clampLeftPanelWidth(event.clientX));
+    };
+    const stopResize = () => setIsLeftPanelResizing(false);
+
+    window.addEventListener('pointermove', updateWidth);
+    window.addEventListener('pointerup', stopResize);
+    window.addEventListener('pointercancel', stopResize);
+
+    return () => {
+      document.body.style.userSelect = previousUserSelect;
+      document.body.style.cursor = previousCursor;
+      window.removeEventListener('pointermove', updateWidth);
+      window.removeEventListener('pointerup', stopResize);
+      window.removeEventListener('pointercancel', stopResize);
+    };
+  }, [clampLeftPanelWidth, isLeftPanelResizing]);
+
+  useEffect(() => {
+    const keepLeftPanelInBounds = () => {
+      setLeftPanelWidth(width => clampLeftPanelWidth(width));
+    };
+    window.addEventListener('resize', keepLeftPanelInBounds);
+    return () => window.removeEventListener('resize', keepLeftPanelInBounds);
+  }, [clampLeftPanelWidth]);
+
+  useEffect(() => {
+    const keepRightPanelInBounds = () => {
+      setRightPanelWidth(width => clampRightPanelWidth(width));
+    };
+    window.addEventListener('resize', keepRightPanelInBounds);
+    return () => window.removeEventListener('resize', keepRightPanelInBounds);
+  }, [clampRightPanelWidth]);
+
   return (
     <div style={{
       width: '100vw', height: '100vh',
@@ -1250,8 +1549,36 @@ function App() {
 
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden', minHeight: 0 }}>
         {/* LEFT: Glossary */}
-        <div style={{ width: 162, flexShrink: 0 }}>
-          <GlossaryPanel sessionId={sessionId} />
+        <div style={{
+          width: leftPanelWidth, flexShrink: 0,
+          display: 'flex',
+          overflow: 'hidden',
+        }}>
+          <div style={{
+            flex: 1, minWidth: 0,
+            display: 'flex', flexDirection: 'column',
+            overflow: 'hidden',
+          }}>
+            <GlossaryPanel sessionId={sessionId} />
+          </div>
+          <div
+            title="Drag to resize"
+            onPointerDown={beginLeftPanelResize}
+            style={{
+              width: 6, flexShrink: 0,
+              cursor: 'col-resize',
+              touchAction: 'none',
+              background: isLeftPanelResizing
+                ? `${C.cyan}33`
+                : isLeftPanelHandleHovering ? `${C.overlay}cc` : C.surface,
+              borderLeft: `1px solid ${isLeftPanelResizing ? C.cyan : C.overlay}`,
+              borderRight: `1px solid ${isLeftPanelResizing ? C.cyan : C.overlay}`,
+              boxShadow: isLeftPanelResizing ? `0 0 10px ${C.cyan}55` : 'none',
+              transition: isLeftPanelResizing ? 'none' : 'background 0.12s, border-color 0.12s',
+            }}
+            onMouseEnter={() => setIsLeftPanelHandleHovering(true)}
+            onMouseLeave={() => setIsLeftPanelHandleHovering(false)}
+          />
         </div>
 
         {/* CENTER: Chat */}
@@ -1265,19 +1592,42 @@ function App() {
 
         {/* RIGHT: Agent + Pet + Code */}
         <div style={{
-          width: 258, flexShrink: 0,
-          display: 'flex', flexDirection: 'column',
-          borderLeft: `1px solid ${C.overlay}`,
+          width: rightPanelWidth, flexShrink: 0,
+          display: 'flex',
           overflow: 'hidden',
         }}>
-          <AgentStatusPanel
-            agentState={agentState}
-            callCount={callCount}
-            tokenCount={tokenCount}
-            currentActivity={currentActivity}
+          <div
+            title="Drag to resize"
+            onPointerDown={beginRightPanelResize}
+            style={{
+              width: 6, flexShrink: 0,
+              cursor: 'col-resize',
+              touchAction: 'none',
+              background: isRightPanelResizing
+                ? `${C.cyan}33`
+                : isRightPanelHandleHovering ? `${C.overlay}cc` : C.surface,
+              borderLeft: `1px solid ${isRightPanelResizing ? C.cyan : C.overlay}`,
+              borderRight: `1px solid ${isRightPanelResizing ? C.cyan : C.overlay}`,
+              boxShadow: isRightPanelResizing ? `0 0 10px ${C.cyan}55` : 'none',
+              transition: isRightPanelResizing ? 'none' : 'background 0.12s, border-color 0.12s',
+            }}
+            onMouseEnter={() => setIsRightPanelHandleHovering(true)}
+            onMouseLeave={() => setIsRightPanelHandleHovering(false)}
           />
-          <DesktopPet agentState={agentState} />
-          <CodeViewer snippet={codeSnippet} />
+          <div style={{
+            flex: 1, minWidth: 0,
+            display: 'flex', flexDirection: 'column',
+            overflow: 'hidden',
+          }}>
+            <AgentStatusPanel
+              agentState={agentState}
+              callCount={callCount}
+              tokenCount={tokenCount}
+              currentActivity={currentActivity}
+            />
+            <DesktopPet agentState={agentState} />
+            <CodeViewer snippet={codeSnippet} />
+          </div>
         </div>
       </div>
 

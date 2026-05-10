@@ -19,13 +19,9 @@ from ..contracts import (
     AgentPetState,
     AgentPhase,
     AgentStatus,
-    ApiError,
-    ChatMessage,
-    ErrorCode,
-    ErrorStage,
 )
 from .dependencies import ApiRuntime
-from .errors import ApiModuleError, api_error, install_exception_handlers
+from .errors import install_exception_handlers
 from .routes import agent, chat, control, github, repositories, session, sidecar
 
 
@@ -166,9 +162,13 @@ def _build_default_runtime(
             teacher=TeacherAgent(llm_client=llm_client, prompt_manager=prompt_manager),
             tool_runtime=tool_runtime,
         )
+        deep_loop = _build_deep_research_loop(
+            llm_client=llm_client,
+            tool_runtime=tool_runtime,
+        )
         turn_runtime = TurnRuntime(
             teaching_loop=teaching_loop,
-            deep_loop=_DeepResearchPlaceholder(),
+            deep_loop=deep_loop,
             idle_status_factory=_idle_agent_status,
         )
 
@@ -229,26 +229,44 @@ def _make_summarizer(llm_client: Any | None):
     return _summarize
 
 
-class _DeepResearchPlaceholder:
-    """Deep research stub: surfaced via TurnRuntime when ``mode=deep``.
+def _build_deep_research_loop(
+    *,
+    llm_client: Any,
+    tool_runtime: Any,
+) -> Any:
+    """Wire the deep_research onboarding loop with its 4 dedicated agents.
 
-    The deep_research package is not implemented yet (per Phase 3 backlog).
-    This placeholder satisfies TurnRuntime's mandatory ``deep_loop`` argument
-    and raises a clear ApiModuleError if ever invoked, so mode=chat traffic
-    stays unaffected while mode=deep returns a friendly error envelope.
+    Per ``deep_research/AGENTS.md`` §9.2 / §11.1, the loop owns its own
+    PromptManager rooted at ``deep_research/prompts/`` (the kernel-wide
+    PromptManager points at a different YAML root and would not resolve the
+    research-specific templates). The four sub-agents share that PromptManager
+    plus the injected LLM client; ``tool_runtime`` is reused from the kernel.
+    ``event_factory`` stays None — the loop builds SSE events directly per
+    spec §11.1's no-``events.*``-import rule.
     """
 
-    async def run(self, **_kwargs: Any) -> ChatMessage:
-        raise ApiModuleError(
-            api_error(
-                error_code=ErrorCode.INVALID_STATE,
-                message="深度研究模式（mode=deep）尚未在新内核启用，请使用 chat 模式。",
-                retryable=False,
-                stage=ErrorStage.DEEP_RESEARCH,
-                internal_detail="DeepResearchLoop is not implemented in new_kernel",
-            ),
-            status_code=501,
-        )
+    from ..deep_research.agents.composer import Composer
+    from ..deep_research.agents.decomposer import Decomposer
+    from ..deep_research.agents.investigator import Investigator
+    from ..deep_research.agents.note_taker import NoteTaker
+    from ..deep_research.deep_research_loop import DeepResearchLoop
+    from ..deep_research.prompts import PROMPTS_ROOT as _DEEP_RESEARCH_PROMPTS_ROOT
+    from ..prompts.prompt_manager import PromptManager
+
+    research_pm = PromptManager(prompts_root=_DEEP_RESEARCH_PROMPTS_ROOT)
+    decomposer = Decomposer(llm_client=llm_client, prompt_manager=research_pm)
+    investigator = Investigator(llm_client=llm_client, prompt_manager=research_pm)
+    note_taker = NoteTaker(llm_client=llm_client, prompt_manager=research_pm)
+    composer = Composer(llm_client=llm_client, prompt_manager=research_pm)
+    return DeepResearchLoop(
+        decomposer=decomposer,
+        investigator=investigator,
+        note_taker=note_taker,
+        composer=composer,
+        tool_runtime=tool_runtime,
+        max_rounds_per_subtopic=2,
+        max_parallel_subtopics=1,
+    )
 
 
 def _apply_runtime_overrides(runtime: ApiRuntime, **overrides: Any) -> None:

@@ -202,6 +202,18 @@ SSE 事件名：
 - `deep_research_progress`
 - `error`
 
+**事件过滤规则（与 `/api/v4/chat/stream` 互斥，避免双流重复推送）**：
+
+后端在 repo stream 上对每条事件按 `turn_id` 字段过滤后再下发：
+
+| 事件 `turn_id` | 是否在 repo stream 下发 | 场景 |
+| --- | --- | --- |
+| `null` / 缺省 | ✅ | 解析阶段事件（`agent_status`、`repo_parse_log`、`repo_connected`、解析期 `error` 等） |
+| 等于 `session.auto_onboarding_turn_id` | ✅ | §4.4 自动 onboarding turn 的全部事件（`answer_stream_*`、`message_completed`、`deep_research_progress`、`teaching_code`） |
+| 任意其它 `turn_id` | ❌ | 用户主动通过 `POST /api/v4/chat/messages` 启动的 turn —— 这些事件**只**通过 `/api/v4/chat/stream?session_id=...&turn_id=...` 下发 |
+
+> **协议不变量**：同一条 SSE 事件**不会同时出现在** repo stream 和 chat stream 上。前端在解析期与 onboarding 期只需订阅 repo stream；用户发送 chat message 后，应订阅 chat stream 接收该 turn 的应答事件。如果前端为了持续监听后台状态保留 repo stream 处于 OPEN，**不会**收到该 chat turn 的 `answer_stream_delta` 重复副本。
+
 `repo_parse_log`：
 
 ```json
@@ -259,6 +271,71 @@ SSE 事件名：
 }
 ```
 
+`initial_message` 只是仓库连接完成提示，用于前端更新解析状态或展示连接完成文案；它本身不表示
+后端追加了普通 chat message。`RepoConnectedEvent` 字段列表保持稳定——前端无需任何额外字段；
+后端不在此事件上挂 `auto_turn_id` 之类的占位字段，自动 onboarding 的 `turn_id` 在后续
+`AnswerStreamStartEvent` 事件中暴露。详见 §4.4。
+
+### 4.4 自动 onboarding 触发协议
+
+仓库接入完成后，后端会自动触发一条 `mode=deep, report_kind=repo_onboarding` 的系统 turn，
+向前端流式吐一份"模块阅读指南"。整套链路只占用既有的 `repositories/stream` SSE 通道，无新增
+HTTP 接口、无新增事件类型、无新增字段。
+
+触发条件：
+
+- `POST /api/v4/repositories` 创建会话且 parse pipeline 全程成功（后端内部 `connected_data is not None`）。
+- parse 中途任意阶段失败，不触发自动 onboarding，直接走常规 `error` 事件路径。
+- 服务端在 emit `repo_connected` 事件之后，紧接着内部调用：
+  ```
+  TurnRuntime.start_turn(
+      state=session,
+      initiator="system",
+      request=SendTeachingMessageRequest(
+          message="<由后端注入的中文 seed，前端不渲染>",
+          mode=ChatMode.DEEP,
+          report_kind=ReportKind.REPO_ONBOARDING,
+      ),
+  )
+  ```
+- 前端不需要主动调用任何接口，只需保持订阅 `GET /api/v4/repositories/stream?session_id=...` 一个流。
+
+事件序列（与 `deep_research/AGENTS.md` §4.2 一致）：
+
+```
+agent_status (scanning -> ...)              # parse 阶段
+repo_parse_log * N
+repo_connected
+agent_status (researching)                   # 自动 turn 启动
+deep_research_progress (phase=triage)
+deep_research_progress (phase=decompose)
+deep_research_progress (phase=investigate, k/N) * N
+agent_status (streaming/researching)         # 进入 compose
+answer_stream_start                          # turn_id 在此事件中暴露
+answer_stream_delta * many
+answer_stream_end
+message_completed                            # message.kind == "repo_onboarding"
+agent_status (idle_after_teach)
+```
+
+前端读取规约：
+
+- 从 `AnswerStreamStartEvent.turn_id` 取本次 onboarding 的 `turn_id`；不要去 `repo_connected`
+  上找 `auto_turn_id`，它不存在也不会被加入。
+- `message_completed.message.kind == "repo_onboarding"` 是判定本条消息走"模块阅读指南"
+  渲染分支的唯一依据；普通对话用 `kind == "answer"`。
+- 用户可以随时 `POST /api/v4/control/cancel` 主动中断；后端在 ≤5s 内 emit
+  `RunCancelledEvent`，并把 agent_status 落回 idle/cancelled。
+
+重复触发：
+
+- 同 session 二次 `POST /api/v4/repositories`（用户换仓）：服务端先 cancel 当前
+  onboarding turn，等其自然走完 finally；随后 reset session state（清 `messages` /
+  `scratchpad` / `repository` / `repo_root` / `current_code` / `parse_log`）；再启动新一轮
+  parse + 自动 onboarding。
+- 用户主动 `POST /api/v4/chat/messages` 带 `mode=deep, report_kind=repo_onboarding`：
+  与自动触发等价，允许重新生成；`active_turn_id` 互斥保护已有，不需要前端额外逻辑。
+
 ## 5. 主聊天与教学 agent
 
 ### `POST /api/v4/chat/messages`
@@ -277,12 +354,20 @@ X-Session-Id: sess_abc123
 {
   "message": "这个仓库的调度器怎么工作？",
   "mode": "chat",
-  "client_message_id": "client_msg_001"
+  "client_message_id": "client_msg_001",
+  "report_kind": "answer"
 }
 ```
 
 `mode=chat`：短教学回答，目标是解释一个当前点。  
 `mode=deep`：深度研究报告，目标是完整结构分析，允许更长时间和更多阶段事件。
+
+`report_kind` 字段（可选，默认 `"answer"`）：
+
+- 类型：枚举字符串 `"answer" | "repo_onboarding"`。
+- 默认值：`"answer"`，与既有 chat 行为完全一致。
+- 校验规则：`mode=deep` 必须搭配 `report_kind=repo_onboarding`；`mode=chat` 必须搭配 `report_kind=answer`。其它组合后端返回 `ApiError(error_code=invalid_request)`。
+- `repo_onboarding` 路径只服务于"仓库接入完成后自动生成入门导读"，前端通常不需要主动传，由后端在 §4.4 描述的链路中自行注入；用户主动重生成 onboarding 时也可显式传 `mode=deep, report_kind=repo_onboarding`。
 
 响应状态码：`202 Accepted`
 
@@ -355,6 +440,7 @@ X-Session-Id: sess_abc123
     "message_id": "msg_agent_001",
     "role": "assistant",
     "mode": "chat",
+    "kind": "answer",
     "content": "完整教学回答...",
     "created_at": "2026-04-26T03:31:10Z",
     "streaming_complete": true,
@@ -381,6 +467,12 @@ X-Session-Id: sess_abc123
   }
 }
 ```
+
+`message.kind` 字段（在响应里出现的 `ChatMessage`，包括 `MessageCompletedEvent.message`、`session` 快照里的历史消息列表等）：
+
+- 类型：枚举字符串 `"answer" | "repo_onboarding"`。
+- 历史 / 兼容默认值：`"answer"`，旧消息和新写入的普通教学消息一律落到这一档。
+- 渲染规约：前端依据 `kind` 决定面板归属——`kind="repo_onboarding"` 通常渲染为"模块阅读指南"面板（导读卡片），`kind="answer"` 仍走常规对话流。`mode` 字段保留原义（`chat | deep`），不替代 `kind`。
 
 ## 6. 术语解释副聊天栏
 
@@ -516,7 +608,7 @@ X-Session-Id: sess_abc123
 | --- | --- |
 | `agent_status` | 更新小宠物、状态面板、调用次数、token |
 | `repo_parse_log` | append 到 `parseLog` |
-| `repo_connected` | `parseState=done`，写入仓库完成消息，设置首个代码片段 |
+| `repo_connected` | `parseState=done`，展示仓库完成提示，设置首个代码片段；不创建聊天消息 |
 | `teaching_code` | 更新右侧代码框 |
 | `answer_stream_start` | 创建 assistant 占位消息 |
 | `answer_stream_delta` | 追加 delta 到占位消息 |

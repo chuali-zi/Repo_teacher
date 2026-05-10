@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\chual\\\\vibe\\\\Irene\\\\web_v4\" -Force)",
+      "Bash(Select-Object Name, PSIsContainer)",
+      "Bash(xargs grep -l \"new_kernel\\\\|/stream\\\\|SSE\\\\|EventSource\")",
+      "Bash(xargs grep -l \"unified-ws\\\\|StreamEvent\\\\|fetch.*stream\\\\|EventSource\")",
+      "Bash(curl -o C:/Users/chual/vibe/Irene/LICENSE https://www.gnu.org/licenses/agpl-3.0.txt)"
+    ]
+  }
+}

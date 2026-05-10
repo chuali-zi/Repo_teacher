@@ -52,6 +52,29 @@ def test_create_app_wires_llm_client_and_turn_runtime_from_valid_config(
     assert runtime.turn_runtime is not None
 
 
+def test_default_runtime_builds_real_deep_research_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SA-08 smoke test: ``deep_loop`` must be a real ``DeepResearchLoop`` instance.
+
+    The retired ``_DeepResearchPlaceholder`` was swapped out in this wave; if
+    composition root regresses to a stub the assertion below fails immediately.
+    """
+
+    from new_kernel.deep_research.deep_research_loop import DeepResearchLoop
+
+    _patch_valid_llm_config(monkeypatch)
+
+    app = create_app(llm_config_path="llm_config.json")
+    turn_runtime = app.state.api_runtime.turn_runtime
+
+    assert turn_runtime is not None
+    deep_loop = getattr(turn_runtime, "_deep_loop", None)
+    assert isinstance(deep_loop, DeepResearchLoop), (
+        f"deep_loop must be a real DeepResearchLoop, got {type(deep_loop).__name__}"
+    )
+
+
 def test_chat_message_with_valid_config_does_not_fail_missing_turn_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

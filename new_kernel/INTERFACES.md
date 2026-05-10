@@ -286,6 +286,7 @@ class SessionState:
     current_code: TeachingCodeSnippet | None = None                         # owner: repo orchestrator / TeachingLoop
 
     active_turn_id: str | None = None                        # owner: TurnRuntime（**仅它写**）
+    auto_onboarding_turn_id: str | None = None               # owner: repo onboarding kickoff（**仅它写**）；repo SSE 流的事件过滤键，避免与 chat stream 双流重复
 
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
@@ -555,11 +556,46 @@ class TeachingLoop:
 
 ### 3.10 `DeepResearchLoop.run`
 
-位于 `deep_research/deep_research_loop.py`。**签名与 `TeachingLoop.run` 一致**，差异仅在内部：
+实现位置：`new_kernel/deep_research/deep_research_loop.py`。
 
-- 默认 `max_steps`、`max_react_iterations` 更高
-- 阶段间通过 `sink.emit(deep_research_progress_event(...))` 上报进度
-- 最终可见正文仍由 `TeacherAgent` 出（spec §5 deep_research）
+签名（与 `turn/turn_runtime.py:TurnLoop` Protocol 严格一致）：
+
+```python
+class DeepResearchLoop:
+    def __init__(
+        self,
+        *,
+        decomposer: Decomposer,
+        investigator: Investigator,
+        note_taker: NoteTaker,
+        composer: Composer,
+        tool_runtime: ToolRuntime,
+        max_rounds_per_subtopic: int = 2,
+        max_parallel_subtopics: int = 1,   # v1 = 1（顺序执行）
+        event_factory: Any | None = None,
+    ) -> None: ...
+
+    async def run(
+        self,
+        *,
+        session_id: str,
+        turn_id: str,
+        user_message: str,
+        scratchpad: Any,
+        repo_overview: str,
+        repo_root: Path,
+        sink: EventSink,
+        status_tracker: StatusTracker,
+        cancellation_token: CancellationToken,
+    ) -> ChatMessage: ...
+```
+
+行为（参考 `deep_research/AGENTS.md` §3 / §5 / §9）：
+
+- Phase 0 Triage（0 LLM call）→ Phase 1 Decompose（1 LLM call）→ Phase 2 Investigate（每个 sub-topic ≤2 轮 ReAct，每轮 ≤1 LLM + ≤1 tool + 1 NoteTaker LLM）→ Phase 3 Compose（1 LLM call，流式 markdown）。
+- 取消点：进入 Phase 1 之前 / 进入每个 sub-topic 之前 / 每轮 ReAct 之前 / 进入 Phase 3 之前 / Phase 3 流式每 8 chunk。
+- 返回 `ChatMessage(role="assistant", mode=ChatMode.DEEP, kind=ReportKind.REPO_ONBOARDING, content=<markdown>, suggestions=...)`；`MessageCompletedEvent` 由 `TurnRuntime` 在 loop 返回后统一 emit，本 loop 不直接发。
+- 错误：`CancelledError` 透传；LLM/工具异常透传到 `TurnRuntime` 转 `ErrorEvent`；JSON 解析失败有兜底，不抛。
 
 ### 3.11 `TurnRuntime`
 
@@ -581,12 +617,14 @@ class TurnRuntime:
         *,
         state: SessionState,
         request: SendTeachingMessageRequest,
+        initiator: Literal["user", "system"] = "user",
     ) -> SendTeachingMessageData:
         """
         校验 state.active_turn_id 必须为 None，否则抛 InvalidStateError -> route 转 ApiError(INVALID_STATE)。
+        initiator 只影响本次显式调用记录的输入消息 role/message_id；仓库连接完成不会自动调用本方法。
         步骤：
           1. 生成 turn_id / 创建 CancellationToken / 注册到内部 registry
-          2. 写 state.active_turn_id；追加 user ChatMessage 到 state.messages
+          2. 写 state.active_turn_id；按 initiator 追加 user/system ChatMessage 到 state.messages
           3. 启动 asyncio.create_task(_run_turn(...))，把 teaching_loop 或 deep_loop 跑起来
           4. 同步返回 SendTeachingMessageData(accepted=True, turn_id=..., chat_stream_url=..., agent_status=current)
         _run_turn 终态：

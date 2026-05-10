@@ -66,6 +66,11 @@ class ChatMode(StrEnum):
     DEEP = "deep"
 
 
+class ReportKind(StrEnum):
+    ANSWER = "answer"
+    REPO_ONBOARDING = "repo_onboarding"
+
+
 class RepoSource(StrEnum):
     GITHUB_URL = "github_url"
 
@@ -149,6 +154,7 @@ class SendTeachingMessageRequest(ContractModel):
     message: str = Field(min_length=1)
     mode: ChatMode = ChatMode.CHAT
     client_message_id: str | None = None
+    report_kind: ReportKind = ReportKind.ANSWER
 
 
 class SidecarExplainRequest(ContractModel):
@@ -241,6 +247,7 @@ class ChatMessage(ContractModel):
     message_id: str
     role: Literal["system", "user", "assistant"]
     mode: ChatMode = ChatMode.CHAT
+    kind: ReportKind = ReportKind.ANSWER
     content: str
     created_at: datetime
     streaming_complete: bool = True

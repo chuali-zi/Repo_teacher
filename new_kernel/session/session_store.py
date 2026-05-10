@@ -57,7 +57,9 @@ class SessionStore:
                 event_bus=self._event_bus_factory(),
                 agent_status=self._idle_status_factory(normalized_id),
                 mode=mode,
-                scratchpad=self._scratchpad_factory(),
+                teaching_scratchpad=self._scratchpad_factory(),
+                # research_scratchpad stays None; TurnRuntime lazy-creates it
+                # the first time a deep-mode turn runs in this session.
             )
             self._sessions[normalized_id] = state
             return state

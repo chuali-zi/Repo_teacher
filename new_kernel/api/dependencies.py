@@ -33,7 +33,6 @@ class ApiRuntime:
     llm_client: Any | None = None
     tool_runtime: Any | None = None
     clone_parent: Path | None = None
-    auto_first_turn: bool = True
     background_tasks: set[Any] = field(default_factory=set)
 
 

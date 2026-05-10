@@ -100,8 +100,8 @@ teaching_loop.run(user_message, scratchpad):
   1. orient_plan = OrientPlanner.process(user_message, scratchpad)
        # 一次 LLM 调用，输出小 reading_plan（最多 3 步）
 
-  2. for step in orient_plan.steps:
-       for round in range(MAX_READ_ROUNDS=3):
+  2. concurrently for step in orient_plan.steps:
+       for round in range(MAX_READ_ROUNDS=3):  # same step keeps sequential ReAct rounds
          decision = ReadingAgent.process(user_message, step, scratchpad)
          if decision.action == "done": break
          observation = tool_runtime.execute(decision.action, decision.action_input)
@@ -119,6 +119,8 @@ teaching_loop.run(user_message, scratchpad):
 ```text
 - 不实现 replan：仓库教学单轮短，第一版用不到。
 - step.tools_hint 改为 step.anchors：[{path, range, why_to_read}]
+- reading steps 并发执行；同一个 step 内 ReAct 轮次仍顺序执行。
+- scratchpad entries 是并发完成顺序，Teacher 侧按 reading_plan/step_id 重组证据。
 - max_react_iterations = 3。
 - max_steps = 3。
 - safety_limit 不需要，步数本来就小。
@@ -332,9 +334,11 @@ orient + plan：
   输出 reading_plan，1-3 个 step，每个 step 带 anchors
 
 read：
+  多个 reading step 并发执行
   每个 step 内 ReadingAgent 最多 3 轮
   每轮一个 tool 调用
-  结果写 scratchpad.entries
+  结果追加写 scratchpad.entries，entry 顺序是完成顺序
+  同一批并发 step 之间不能依赖彼此 observation；跨 step 摘要只作 best-effort
 
 teach：
   TeacherAgent 流式输出自然教学回答
@@ -489,4 +493,3 @@ async for chunk in loop.run("讲讲 backend/main.py 是怎么 bootstrap 的", sc
 7. DeepTutor/deeptutor/agents/solve/agents/writer_agent.py
 8. DeepTutor/deeptutor/agents/solve/main_solver.py
 ```
-

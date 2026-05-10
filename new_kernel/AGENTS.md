@@ -231,10 +231,11 @@ GithubResolver
 
 ```text
 OrientPlanner.process()
-  -> for each step:
-       ReadingAgent.process()
-       ToolRuntime.execute()
-       Scratchpad.add_entry()
+  -> concurrently for each step:
+       for each step-local round:
+         ReadingAgent.process()
+         ToolRuntime.execute()
+         Scratchpad.add_entry()
   -> TeacherAgent.process(stream)
   -> scratchpad.covered_points update
 ```
@@ -244,6 +245,9 @@ OrientPlanner.process()
 - `OrientPlanner` 一次 LLM 调用输出 1-3 个 reading steps。
 - 每个 step 内 `ReadingAgent` 最多 3 轮 ReAct。
 - 每轮最多一个工具调用。
+- 多个 reading step 可以并发执行；同一个 step 内的 ReAct 轮次必须保持顺序。
+- 并发 step 共享同一个 `Scratchpad`，但只能追加 `ReadEntry`；entry 顺序是完成顺序，不表示 reading plan 顺序。Teacher 阶段必须以 `reading_plan` 和 `step_id` 重组证据。
+- 并发 step 不能依赖同一批其他 step 的 observation；跨 step summary 只能作为 best-effort 上下文。
 - `ReadingAgent.action` 必须在 `ToolRuntime.valid_actions` 内，否则降级为 `done`。
 - `TeacherAgent` 一次只讲一个核心点，最多 3 个 source anchors，结尾恰好一个 next teaching point。
 - 证据不足时缩小说法，不要编造，也不要把工具错误展示成教学正文。
@@ -312,6 +316,7 @@ prompts/zh/sidecar.yaml
 - 过程中可发 `DeepResearchProgressEvent`。
 - 最终可见正文仍必须由 writer/teacher 阶段收敛。
 - 不因此引入 web search、RAG 或外部研究工具。
+- 具体实现细节、Phase 切分、prompt 基调、自动触发流程、合同字段（`ReportKind` / `ChatMessage.kind` / `SendTeachingMessageRequest.report_kind`）：见 `deep_research/AGENTS.md`。
 
 ### Sidecar Explainer
 

@@ -26,6 +26,7 @@ from ...contracts import (
     ParseLogLine,
     RepoConnectedData,
     RepoSource,
+    ReportKind,
     RepositoryStatus,
     RepositorySummary,
     SendTeachingMessageRequest,
@@ -129,7 +130,19 @@ async def repository_stream(
     runtime = get_runtime(request)
     session = await get_session(runtime, session_id, stage=ErrorStage.REPO_PARSE)
     event_bus = _require_event_bus(session)
-    return sse_response(event_bus, request)
+
+    def event_filter(event: Any) -> bool:
+        # Repo stream carries parse-phase events (no turn_id) and the auto-triggered
+        # onboarding turn's events. User-initiated chat turns flow exclusively through
+        # /api/v4/chat/stream; without this guard, chat deltas would be delivered on
+        # both streams and the frontend would append each delta twice.
+        event_turn_id = getattr(event, "turn_id", None)
+        if event_turn_id is None:
+            return True
+        auto_turn_id = getattr(session, "auto_onboarding_turn_id", None)
+        return auto_turn_id is not None and event_turn_id == auto_turn_id
+
+    return sse_response(event_bus, request, event_filter=event_filter)
 
 
 async def _resolve_without_remote_check(resolver: Any, input_value: str) -> Any:
@@ -235,12 +248,43 @@ async def _run_parse_pipeline(
         _set_if_possible(session, "parse_log", list(parse_log))
     if connected_data is not None:
         await _publish_repo_connected(runtime, session, connected_data)
-        if getattr(runtime, "auto_first_turn", True):
-            await _kickoff_initial_turn(
-                runtime=runtime,
-                session=session,
-                connected_data=connected_data,
-            )
+        await _kickoff_repo_onboarding(runtime=runtime, session=session)
+
+
+async def _kickoff_repo_onboarding(*, runtime: ApiRuntime, session: Any) -> None:
+    """Auto-trigger a deep_research onboarding turn after the parse pipeline succeeds.
+
+    Per ``deep_research/AGENTS.md`` §4 / §9.3 the trigger only fires when both
+    ``runtime.turn_runtime`` is wired and the parse pipeline produced a
+    ``connected_data`` (the caller already gates on the latter). Any failure
+    inside ``start_turn`` — including ``InvalidTurnStateError`` if a previous
+    turn is still running — is swallowed so the parse pipeline result remains
+    visible; the user can re-issue manually via ``POST /chat/messages`` with
+    ``mode=deep, report_kind=repo_onboarding``.
+    """
+
+    turn_runtime = getattr(runtime, "turn_runtime", None)
+    if turn_runtime is None:
+        return
+    request = SendTeachingMessageRequest(
+        message="请基于刚刚接入的仓库生成一份面向新手的入门导读。",
+        mode=ChatMode.DEEP,
+        report_kind=ReportKind.REPO_ONBOARDING,
+    )
+    try:
+        result = await call_maybe_async(
+            turn_runtime.start_turn,
+            state=session,
+            request=request,
+            initiator="system",
+        )
+    except Exception:
+        # Per AGENTS.md §4.1: never fail the parse pipeline because onboarding
+        # could not auto-start. The user can re-issue via mode=deep manually.
+        return
+    onboarding_turn_id = getattr(result, "turn_id", None) if result is not None else None
+    if onboarding_turn_id:
+        _set_if_possible(session, "auto_onboarding_turn_id", onboarding_turn_id)
 
 
 async def _call_with_supported_kwargs(func: Callable[..., Any], **kwargs: Any) -> Any:
@@ -269,44 +313,6 @@ async def _publish_repo_connected(
         initial_message=data.initial_message,
         current_code=data.current_code,
     )
-
-
-async def _kickoff_initial_turn(
-    *,
-    runtime: ApiRuntime,
-    session: Any,
-    connected_data: RepoConnectedData,
-) -> None:
-    """Start the automatic first teaching turn without breaking repo connection."""
-
-    turn_runtime = runtime.turn_runtime
-    if turn_runtime is None:
-        return
-
-    initial_text = (connected_data.initial_message or "").strip()
-    if not initial_text:
-        initial_text = (
-            "请先用 3-5 句概览这个仓库的整体架构、核心模块和入口文件，"
-            "然后挑 1 个最重要的入口点带我读一下。"
-        )
-
-    request = SendTeachingMessageRequest(message=initial_text, mode=ChatMode.CHAT)
-    try:
-        await call_maybe_async(
-            turn_runtime.start_turn,
-            state=session,
-            request=request,
-            initiator="system",
-        )
-    except Exception as exc:
-        error = api_error(
-            error_code=ErrorCode.INVALID_STATE,
-            message="自动首轮讲解未能启动，请直接发送你的第一个问题。",
-            retryable=False,
-            stage=ErrorStage.CHAT,
-            internal_detail=f"{exc.__class__.__name__}: {exc}",
-        )
-        await _publish(runtime, session, ("error_event",), error=error)
 
 
 async def _publish(runtime: ApiRuntime, session: Any, method_names: tuple[str, ...], **payload: Any) -> None:

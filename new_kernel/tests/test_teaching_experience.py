@@ -14,7 +14,7 @@ from openai import APITimeoutError, AuthenticationError, RateLimitError
 from new_kernel.agents.teacher import TeacherOutput
 from new_kernel.agents.teaching_loop import TeachingLoop
 from new_kernel.api.dependencies import ApiRuntime
-from new_kernel.api.routes.repositories import _kickoff_initial_turn
+from new_kernel.api.routes.repositories import _run_parse_pipeline
 from new_kernel.contracts import (
     AgentMetrics,
     AgentPetState,
@@ -22,6 +22,7 @@ from new_kernel.contracts import (
     AgentStatus,
     ChatMessage,
     ChatMode,
+    CreateRepositorySessionRequest,
     RepoConnectedData,
     RepositoryStatus,
     RepositorySummary,
@@ -177,43 +178,27 @@ def test_turn_runtime_records_system_initiator_message() -> None:
     assert state.messages[1].role == "assistant"
 
 
-def test_auto_first_turn_uses_system_initiator() -> None:
-    turn_runtime = _RecordingTurnRuntime()
-    runtime = ApiRuntime(
-        turn_runtime=turn_runtime,
-        event_factory=EventFactory(),
-    )
+def test_repo_parse_pipeline_does_not_start_turn_after_connected() -> None:
     session = _TurnState()
     connected = _repo_connected()
-
-    asyncio.run(
-        _kickoff_initial_turn(
-            runtime=runtime,
-            session=session,
-            connected_data=connected,
-        )
-    )
-
-    assert turn_runtime.calls == [("system", connected.initial_message)]
-
-
-def test_auto_first_turn_failure_emits_error_event() -> None:
     runtime = ApiRuntime(
-        turn_runtime=_FailingTurnRuntime(),
+        turn_runtime=_UnexpectedTurnRuntime(),
         event_factory=EventFactory(),
     )
-    session = _TurnState()
 
     asyncio.run(
-        _kickoff_initial_turn(
+        _run_parse_pipeline(
             runtime=runtime,
+            pipeline=_RepoPipelineStub(connected),
             session=session,
-            connected_data=_repo_connected(),
+            payload=CreateRepositorySessionRequest(input_value="acme/demo", mode=ChatMode.CHAT),
         )
     )
 
     assert session.event_bus.events
-    assert session.event_bus.events[-1].event_type == "error"
+    assert session.event_bus.events[-1].event_type == "repo_connected"
+    assert session.messages == []
+    assert session.active_turn_id is None
 
 
 def _fake_chat_client(completions: Any) -> Any:
@@ -345,24 +330,28 @@ class _TurnLoopStub:
         )
 
 
-class _RecordingTurnRuntime:
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, str]] = []
+class _RepoPipelineStub:
+    def __init__(self, connected: RepoConnectedData) -> None:
+        self._connected = connected
 
-    async def start_turn(
-        self,
-        *,
-        state: Any,
-        request: SendTeachingMessageRequest,
-        initiator: str,
-    ) -> None:
-        del state
-        self.calls.append((initiator, request.message))
+    async def run(self, *, connected_sink: Any, **_kwargs: Any) -> Any:
+        await connected_sink(self._connected)
+        return type(
+            "RepoParseResult",
+            (),
+            {
+                "repository": self._connected.repository,
+                "repo_root": Path.cwd(),
+                "overview": "overview",
+                "current_code": self._connected.current_code,
+                "parse_log": [],
+            },
+        )()
 
 
-class _FailingTurnRuntime:
+class _UnexpectedTurnRuntime:
     async def start_turn(self, **_kwargs: Any) -> None:
-        raise RuntimeError("already active")
+        raise AssertionError("repo parse must not start a teaching turn")
 
 
 def _repo_connected() -> RepoConnectedData:

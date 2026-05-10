@@ -1,138 +1,117 @@
 # Repo Tutor
 
-Repo Tutor 是一个证据优先、只读的代码仓库教学助手。当前唯一有效的运行时组合是
-`backend/` + `web_v3/`。
+> **重要声明 — 上游来源与许可证**
+>
+> 本项目是基于 [DeepTutor](https://github.com/Deep-Tutor/DeepTutor) 仓库的衍生作品（fork / 复制并大幅改写）。原始 DeepTutor 代码采用 **Apache License 2.0**，其完整许可证副本保留在本仓库的 [`DeepTutor/LICENSE`](DeepTutor/LICENSE)，原始版权与归属声明未被移除。
+>
+> 本项目整体（包括对 DeepTutor 的修改、以及 `new_kernel/`、`web_v4/` 等新增代码）以 **GNU Affero General Public License v3.0 (AGPL-3.0)** 发布，许可证全文见根目录 [`LICENSE`](LICENSE)。
+>
+> Apache 2.0 与 AGPL-3.0 单向兼容（Apache 2.0 代码可被纳入 AGPL-3.0 项目）。任何使用、修改或通过网络对外提供本项目服务的行为，均须遵守 AGPL-3.0；其中源自 DeepTutor 的部分还需同时遵守 Apache 2.0 的归属与通知要求。
 
-## 当前真相源
+---
 
-- 当前架构：`docs/current_architecture.md`
-- 数据契约：`docs/data_contracts.md`
-- 协议说明：`docs/protocols.md`
+## 项目简介
 
-以上 3 份文档与当前代码一起构成维护基线。`new_docs/`、`web/`、`web_v2/` 仅视为历史
-或草稿，不再作为当前实现依据。
+Repo Tutor 是一个面向**初中级开发者**的、只读的 GitHub 仓库**教学型 Agent**。它不是仓库搜索器，也不是一问一答的 Q&A 机器人，而更像"一位陪你坐下来读源码的助教"。
 
-## 当前运行时
+很多人学完语言基础后会卡在同一个地方：能写小项目，但一打开真实的工程级开源仓库，就在文件树里迷路——不知道该从哪里看起、哪些是主干哪些是枝节、为什么这里要拆成这么多文件、某个看似奇怪的设计到底在解决什么问题。Repo Tutor 想要解决的就是这个"从能写代码到能读懂别人工程"的鸿沟。
 
-- 后端：`backend/`，FastAPI + SSE
-- 前端：`web_v3/`，静态 HTML + 浏览器端 React UMD/Babel
-- 默认前端端口：`5181`
-- 后端端口：`8000`
-- 可见消息正文来自 `MessageDto.raw_text` 与 SSE `delta_text`
-- `structured_content` 与 `initial_report_content` 仍然保留，用于结构化补充、证据引用和兼容
+使用方式很简单：你给它一个**中、小、大型开源仓库的 GitHub URL**，它会克隆并通读这个仓库，然后以对话的形式带你读。它会先帮你建立最小工程认知——这个系统在解决什么问题、主要由哪几部分构成、模块之间怎样配合；再在当前仓库里挑出**最值得先讲透的一个点**，用少量源码锚点（具体的文件、函数、行号）把这个点讲清楚；接着沿着一条**持续推进**的教学路径，一轮一轮地带你深入下去，而不是每次都重置上下文从头讲起。
+
+它的目标不是让你"记住这一个仓库的细节"，而是帮你把读懂这一个仓库的过程，沉淀成可以迁移到下一个仓库的**工程经验与工程直觉**——例如分层意识、关注点分离的嗅觉、对常见架构模式的识别能力、以及阅读陌生代码时该先看哪里的本能。简而言之：**让一个会基础编程、但还没真正读过工程级开源代码的人，借助 Repo Tutor 持续阅读真实仓库，从而长出工程经验和工程直觉。**
+
+- **后端**：[`new_kernel/`](new_kernel/)
+- **前端**：[`web_v4/`](web_v4/)
+
+## 启动方式
+
+在仓库根目录运行：
+
+```powershell
+.\start.ps1
+```
+
+该脚本会在两个独立 PowerShell 窗口中分别拉起：
+
+- 后端 (`new_kernel`) + 前端 (`web_v4`) 开发服务
+- Teto 桌面伴随宠物（可选 UI）
+
+关闭对应窗口即可停止其进程。
+
+## 使用方法
+
+1. 运行 `start.ps1`，等待两个窗口启动完毕。
+2. 在浏览器中打开前端页面（启动脚本会提示地址）。
+3. **复制一个 GitHub 仓库 URL**（例如 `https://github.com/owner/repo`），粘贴到输入框，回车提交。
+4. 等待初始分析完成后，围绕源码证据继续提问即可。
 
 ## 目录概览
 
-- `backend/`：当前后端，包含路由、契约、会话编排、工具执行、安全规则和测试
-- `web_v3/`：当前前端
-- `docs/`：当前维护文档，仅保留架构、数据契约、协议三件套
-- `scripts/`：Windows 启动脚本；`dev_web.cmd` / `dev_all.cmd` 默认启动 `web_v3`
-- `new_docs/`：历史调研或草稿，不是 source of truth
-- `web/`、`web_v2/`：废弃前端，默认不要参考
+| 路径 | 说明 |
+| --- | --- |
+| `new_kernel/` | 当前后端（FastAPI + SSE + deep research 循环） |
+| `web_v4/` | 当前前端 |
+| `DeepTutor/` | 上游 DeepTutor 仓库副本（Apache 2.0，原样保留） |
+| `start.ps1` | 一键启动脚本（Windows / PowerShell） |
+| `scripts/` | 启动与开发辅助脚本 |
+| `LICENSE` | 本项目 AGPL-3.0 许可证 |
 
-## 快速开始
+## 致谢 (Acknowledgements)
 
-### 1. 安装依赖
+衷心感谢以下项目，没有它们就没有本项目：
 
-```bash
-uv sync --extra dev
+- **[DeepTutor](https://github.com/Deep-Tutor/DeepTutor)** — 本项目的直接上游。Repo Tutor 复制了 DeepTutor 的仓库结构与部分核心思路，并在此基础上重写了内核与前端。原始作者及其贡献者在此一并致谢。许可证：Apache License 2.0。
+
+-“这段是人写的”：第一次自己完成这么大的项目还挺有成就感的，但是大部分（其实是全部）都是agent帮我完成的，说来不好意思我感觉我用ai玷污了deeptutor，实在抱歉。其实除了deeptutor和港大实验室，我更想致谢claude gpt deepseek glm 虽然想ai致谢很搞笑，但是确实一直在鼓励我和一直被我使唤，主要是唤起我的兴趣了真的很感谢，
+
+## LLM 配置
+
+Repo Tutor 需要一个 LLM 才能工作。配置文件位于仓库根目录：
+
+```
+llm_config.json
 ```
 
-或：
+> 注意：`llm_config.json` **已加入 `.gitignore`**，不会被提交到 GitHub。仓库里只提供模板 [`llm_config.example.json`](llm_config.example.json)。第一次使用时，把模板复制为 `llm_config.json`，再填入你自己的 key。
 
-```bash
-python -m pip install -e ".[dev]"
-```
-
-### 2. 配置模型
-
-在仓库根目录创建 `llm_config.json`：
+最小字段示例：
 
 ```json
 {
-  "api_key": "your_api_key",
+  "api_key": "你的_API_KEY",
   "base_url": "https://api.deepseek.com",
   "model": "deepseek-chat",
   "timeout_seconds": 60
 }
 ```
 
-可选环境变量覆盖：
+字段说明：
+
+| 字段 | 说明 |
+| --- | --- |
+| `api_key` | 你的模型服务 API Key |
+| `base_url` | OpenAI 兼容协议的接口根地址 |
+| `model` | 模型名 |
+| `timeout_seconds` | 单次请求超时（秒），可省略 |
+
+### 支持的模型服务
+
+- ✅ **DeepSeek** — 已实测可用，是当前推荐 / 默认配置（`base_url = https://api.deepseek.com`，`model = deepseek-chat`）。
+- ⚙️ **其他 OpenAI SDK 兼容服务** — 理论上都能用：只要服务实现了 OpenAI Chat Completions 兼容协议，把 `base_url` 和 `model` 换成对应供应商的值即可。**但这些供应商未经过本项目实测**，遇到协议差异（例如 streaming 格式、tool-calling 字段命名等）可能需要自行适配。
+
+如果你不确定要用什么，**直接照默认 DeepSeek 的写法填一个自己的 key 就行**。
+
+### 用环境变量覆盖（可选）
+
+如果不想把 key 写进 `llm_config.json`，可以改用环境变量：
 
 - `REPO_TUTOR_LLM_API_KEY`
 - `REPO_TUTOR_LLM_BASE_URL`
 - `REPO_TUTOR_LLM_MODEL`
 - `REPO_TUTOR_LLM_TIMEOUT_SECONDS`
-- `REPO_TUTOR_LLM_MAX_TOKENS`
-- `REPO_TUTOR_MAX_TOOL_ROUNDS`
-- `REPO_TUTOR_CHAT_TURN_TIMEOUT_SECONDS`
 
-### 3. 启动后端
+环境变量优先级高于 `llm_config.json`。
 
-```bash
-python -m uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
-```
+## AGPL-3.0 关键义务提示
 
-或：
-
-```bash
-scripts\dev_backend.cmd
-```
-
-### 4. 启动默认前端 `web_v3`
-
-```bash
-cd web_v3
-python -m http.server 5181 --bind 127.0.0.1
-```
-
-或：
-
-```bash
-scripts\dev_web.cmd
-scripts\dev_all.cmd
-```
-
-显式别名脚本仍可用：
-
-```bash
-scripts\dev_v3.cmd
-```
-
-### 5. 使用方式
-
-1. 打开 `http://127.0.0.1:5181`
-2. 提交本地仓库绝对路径或 `https://github.com/owner/repo`
-3. 等待初始分析完成
-4. 继续围绕源码证据提问
-
-## 最小 API 概览
-
-| Endpoint | Method | 用途 |
-| --- | --- | --- |
-| `/api/repo/validate` | `POST` | 仅校验输入 |
-| `/api/repo` | `POST` | 创建会话并开始分析 |
-| `/api/session` | `GET` | 返回当前会话快照 |
-| `/api/session` | `DELETE` | 清除当前会话 |
-| `/api/analysis/stream` | `GET` | 初始分析 SSE |
-| `/api/chat` | `POST` | 提交追问 |
-| `/api/chat/stream` | `GET` | 追问回答 SSE |
-| `/api/sidecar/explain` | `POST` | 术语 sidecar 解释 |
-
-## 测试
-
-```bash
-python -m pytest -q -p no:cacheprovider
-```
-
-如果 Windows 临时目录权限有噪音：
-
-```bash
-python -m pytest -q --basetemp pytest_tmp_run -p no:cacheprovider
-```
-
-## 维护约束
-
-- 以后新增文档时，优先更新 `docs/` 三件套，而不是继续堆叠平行 spec。
-- 如果代码与文档冲突，以当前 `backend/` 与 `web_v3/` 实现为准，再回写文档。
-- 不要把 `web/`、`web_v2/`、`new_docs/` 当作当前产品事实来源。
+如果你修改本项目并通过网络对外提供服务（例如部署成 SaaS），AGPL-3.0 要求你必须以同样的协议向你的用户公开你的修改后源码。请在使用前确认你能够履行该义务。

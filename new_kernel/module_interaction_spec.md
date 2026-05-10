@@ -177,6 +177,7 @@ contracts
 - `session` 不启动 repo parse、不启动 turn、不调用 LLM、不调用 tools。
 - `SessionState` 可被上层运行时更新，但 `SessionStore` 不包含业务流程。
 - 除 `TurnRuntime` 和 repo session 创建流程外，其他模块不能直接写 `active_turn_id`。
+- `auto_onboarding_turn_id` 仅由 `api/routes/repositories.py::_kickoff_repo_onboarding` 在自动触发 onboarding turn 成功后写一次；其它模块只读不写。`api/routes/repositories.py::repository_stream` 在 SSE filter 中读它来判定 repo stream 是否放行某个带 `turn_id` 的事件。
 - `messages`、`scratchpad`、`current_code` 的写入必须发生在明确的流程阶段，不能由 API route 随手改。
 
 ### `api/`
@@ -348,6 +349,7 @@ POST /api/v4/repositories
         (b) 通过 EventFactory + EventSink 广播为对应 SseEvent 子类
   -> repo pipeline returns RepoParseResult
   -> owner updates SessionState.repository / current_code / parse_log / agent_status
+  -> publish repo_connected and stop; no teaching turn is started automatically
   -> api/sse.py streams events to frontend
 ```
 
@@ -356,6 +358,7 @@ POST /api/v4/repositories
 - `repo.parse_pipeline` 自己从 `SessionStore` 查 session。
 - `repo.parse_pipeline` 自己 import `events` 模块或自己构造 SseEvent；事件构造由 sink 的上层 orchestrator 完成。
 - `api` 自己扫描文件树。
+- 仓库接入完成后自动调用 `TurnRuntime.start_turn()` 或写入 `messages`。
 - `events` 根据 event 反向修改 session。
 
 ### 普通教学 turn
@@ -368,15 +371,23 @@ POST /api/v4/chat/messages
   -> TurnRuntime appends user ChatMessage
   -> TeachingLoop.run(...)
        -> OrientPlanner.process()
-       -> for each step:
-            ReadingAgent.process()
-            ToolRuntime.execute()
-            Scratchpad.add_entry()
+       -> concurrently for each reading step:
+            -> for each step-local round:
+                 ReadingAgent.process()
+                 ToolRuntime.execute()
+                 Scratchpad.add_entry()
        -> TeacherAgent.process(stream)
        -> Scratchpad.covered_points update
   -> TurnRuntime emits MessageCompletedEvent
   -> TurnRuntime clears active_turn_id
 ```
+
+并发 reading 约束：
+
+- 不同 reading step 可以并发执行；同一个 step 内的 ReAct 轮次必须顺序执行。
+- 并发 worker 共享 `Scratchpad`，但只允许追加 `ReadEntry`，不能覆盖 plan 或 covered points。
+- `Scratchpad.read_entries` 的顺序是完成顺序，不保证等于 `reading_plan` 顺序；消费方必须按 `step_id` / `reading_plan` 重组证据。
+- 并发 worker 不能依赖同一批其他 step 的 observation；跨 step summary 只能是 best-effort 上下文。
 
 禁止：
 
@@ -463,11 +474,15 @@ POST /api/v4/control/cancel
 | `SessionState.agent_status` | `events.AgentStatusTracker`/turn/repo orchestrator | 状态 tracker 或明确状态 writer |
 | `SessionState.parse_log` | repo 接入流程 | repo orchestrator |
 | `SessionState.messages` | turn runtime | `TurnRuntime` |
-| `SessionState.scratchpad` | teaching/deep loop | `TeachingLoop` / `DeepResearchLoop` |
+| `SessionState.teaching_scratchpad` | teaching loop 写入 | `TeachingLoop` |
+| `SessionState.research_scratchpad` | deep_research loop 写入 (lazy by TurnRuntime when mode=DEEP) | `DeepResearchLoop` |
 | `SessionState.current_code` | repo/teaching focus owner | repo orchestrator / TeachingLoop |
 | `SessionState.mode` | session creation / turn request | route via validated request |
 | `SessionState.active_turn_id` | turn runtime | `TurnRuntime` only |
+| `SessionState.auto_onboarding_turn_id` | repo session 创建流程 | `api/routes/repositories.py::_kickoff_repo_onboarding` only |
 | `EventBus` queues | events | `EventBus.publish/subscribe` only |
+
+兼容期保留 `SessionState.scratchpad` 作为 `teaching_scratchpad` 的 property alias，仅服务旧测试与 `TurnDependencyError` 防御检查；新代码请直接读对应 `*_scratchpad`。
 
 任何新状态必须先写明 owner，再实现。
 
@@ -494,6 +509,7 @@ TeachingLoop
   -> ToolResult
 TeachingLoop
   -> Scratchpad.add_entry(... observation=ToolResult.content ...)
+     # concurrent steps append only; order is completion order, grouped by step_id later
 TeacherAgent
   -> consumes Scratchpad.build_teacher_context()
 ```
@@ -540,9 +556,9 @@ Tool -> ApiEnvelope
 | 发起模块 | 允许导入 |
 | --- | --- |
 | `api/*` | `contracts`, `api.envelope`, `api.errors`, `api.sse`, `session.*`, `turn.turn_runtime`, `repo.github_resolver`, `repo.parse_pipeline`, `agents.sidecar_explainer`, `events.*` |
-| `turn/*` | `contracts`, `session.session_state`, `events.*`, `agents.teaching_loop`, `deep_research.deep_research_loop`, `turn.cancellation` |
+| `turn/*` | `contracts`, `session.session_state`, `events.*`, `agents.teaching_loop`, `deep_research.deep_research_loop`, `deep_research.research_scratchpad`, `turn.cancellation` |
 | `agents/*` | `contracts`, `llm.client`, `prompts.prompt_manager`, `memory.scratchpad`, `tools.tool_protocol`, `tools.tool_runtime` |
-| `deep_research/*` | `contracts`, `agents.teacher`, `agents.reading_agent`, `memory.scratchpad`, `tools.tool_protocol`, `tools.tool_runtime` |
+| `deep_research/*` | `contracts`, `agents.base_agent`（仅作基类）, `llm.client`, `prompts.prompt_manager`, `memory.scratchpad`（仅 Anchor 值类型）, `tools.tool_protocol`, `tools.tool_runtime` |
 | `repo/*` | `contracts`, `tools.safe_paths`（事件通过传入的 sink callable 发，不直接 import `events`） |
 | `session/*` | `contracts`, `events.event_bus`, `memory.scratchpad` |
 | `events/*` | `contracts` |
@@ -550,6 +566,10 @@ Tool -> ApiEnvelope
 | `memory/*` | stdlib, optional `contracts` value models only |
 | `prompts/*` | stdlib, yaml parser |
 | `llm/*` | stdlib, selected SDK |
+
+deep_research 模块**禁止**导入 `agents.teacher` / `agents.reading_agent` / `agents.orient_planner` / `agents.teaching_loop` / `agents.sidecar_explainer` / `api.*` / `session.*` / `turn.*` / `events.*` / `repo.*`。这些约束在 `deep_research/AGENTS.md` §0.2 与 §11.1 已明确，本表与之对齐。
+EventSink 与 EventFactory 只通过参数注入，不在 deep_research 内构造。
+RepoOverview/repo_root 只通过参数注入，不在 deep_research 内 import `repo.*`。
 
 ## 14. 解耦验收
 

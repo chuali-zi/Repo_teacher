@@ -11,6 +11,7 @@ from ...contracts import (
     ChatMode,
     ErrorCode,
     ErrorStage,
+    ReportKind,
     SendTeachingMessageData,
     SendTeachingMessageRequest,
 )
@@ -42,6 +43,7 @@ async def send_chat_message(
 ) -> ApiEnvelope[SendTeachingMessageData]:
     runtime = get_runtime(request)
     stage = _stage_for_mode(payload.mode)
+    _validate_mode_report_kind(payload, stage=stage)
     session_id = get_session_id_header(request)
     session = await get_session(runtime, session_id, stage=stage)
     turn_runtime = require_dependency(runtime, "turn_runtime", stage=stage)
@@ -114,6 +116,33 @@ def _coerce_turn_data(result: Any) -> SendTeachingMessageData:
 
 def _stage_for_mode(mode: ChatMode) -> ErrorStage:
     return ErrorStage.DEEP_RESEARCH if mode == ChatMode.DEEP else ErrorStage.CHAT
+
+
+def _validate_mode_report_kind(
+    payload: SendTeachingMessageRequest, *, stage: ErrorStage
+) -> None:
+    if payload.mode == ChatMode.DEEP and payload.report_kind != ReportKind.REPO_ONBOARDING:
+        raise ApiModuleError(
+            api_error(
+                error_code=ErrorCode.INVALID_REQUEST,
+                message="深度模式当前仅用于仓库入门报告。",
+                retryable=False,
+                stage=ErrorStage.CHAT,
+                internal_detail=f"mode=deep with report_kind={payload.report_kind}",
+            ),
+            status_code=400,
+        )
+    if payload.mode == ChatMode.CHAT and payload.report_kind != ReportKind.ANSWER:
+        raise ApiModuleError(
+            api_error(
+                error_code=ErrorCode.INVALID_REQUEST,
+                message="普通模式仅用于教学回答。",
+                retryable=False,
+                stage=ErrorStage.CHAT,
+                internal_detail=f"mode=chat with report_kind={payload.report_kind}",
+            ),
+            status_code=400,
+        )
 
 
 def _require_event_bus(session: Any) -> Any:

@@ -351,11 +351,12 @@ class TurnRuntime:
         try:
             cancellation_token.raise_if_cancelled()
             loop = self._deep_loop if mode == ChatMode.DEEP else self._teaching_loop
+            scratchpad_for_turn = _select_scratchpad(state, mode)
             assistant_message = await loop.run(
                 session_id=session_id,
                 turn_id=turn_id,
                 user_message=request.message,
-                scratchpad=state.scratchpad,
+                scratchpad=scratchpad_for_turn,
                 repo_overview=_repo_overview(state),
                 repo_root=repo_root,
                 sink=sink,
@@ -684,6 +685,38 @@ def _ensure_messages_owner_shape(state: TurnSessionState) -> None:
             "当前会话缺少 scratchpad，无法开始回答。",
             internal_detail="SessionState.scratchpad is missing",
         )
+
+
+def _select_scratchpad(state: TurnSessionState, mode: ChatMode) -> Any:
+    """Pick the right scratchpad for the requested mode.
+
+    Deep-research turns need ``ResearchScratchpad`` (sub-topic ledger), teaching
+    turns need ``memory.Scratchpad`` (reading-step ledger). The two have
+    disjoint method surfaces, so passing the wrong one raises ``AttributeError``
+    inside the loop. ``SessionState`` keeps both slots; this helper selects and
+    lazy-creates the deep one on first use. The defensive ``getattr`` /
+    ``hasattr`` paths keep minimal ``TurnSessionState`` test stubs (which only
+    declare ``scratchpad: Any``) compatible.
+    """
+
+    if mode == ChatMode.DEEP:
+        pad = getattr(state, "research_scratchpad", None)
+        if pad is None:
+            from ..deep_research.research_scratchpad import ResearchScratchpad
+
+            pad = ResearchScratchpad()
+            try:
+                state.research_scratchpad = pad  # type: ignore[attr-defined]
+            except Exception:
+                # Frozen / Protocol-only stubs may not accept the assignment;
+                # the local pad still drives this turn.
+                pass
+        return pad
+
+    teaching_pad = getattr(state, "teaching_scratchpad", None)
+    if teaching_pad is not None:
+        return teaching_pad
+    return state.scratchpad
 
 
 def _repo_overview(state: TurnSessionState) -> str:

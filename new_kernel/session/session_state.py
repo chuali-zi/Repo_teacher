@@ -1,4 +1,4 @@
-# SessionState：单个 session 的全部内存状态，字段含 session_id / repository / agent_status / parse_log / messages / scratchpad / current_code / mode / active_turn_id / event_bus 引用。
+# SessionState：单个 session 的全部内存状态，字段含 session_id / repository / agent_status / parse_log / messages / teaching_scratchpad / research_scratchpad / current_code / mode / active_turn_id / event_bus 引用。
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -16,6 +16,7 @@ from ..contracts import (
 )
 
 if TYPE_CHECKING:
+    from ..deep_research.research_scratchpad import ResearchScratchpad
     from ..events.event_bus import EventBus
     from ..memory.scratchpad import Scratchpad
 
@@ -62,9 +63,11 @@ class SessionState:
     repo_root: Path | None = None
     parse_log: list[ParseLogLine] = field(default_factory=list)
     messages: list[ChatMessage] = field(default_factory=list)
-    scratchpad: "Scratchpad" = field(default_factory=default_scratchpad_factory)
+    teaching_scratchpad: "Scratchpad" = field(default_factory=default_scratchpad_factory)
+    research_scratchpad: "ResearchScratchpad | None" = None
     current_code: TeachingCodeSnippet | None = None
     active_turn_id: str | None = None
+    auto_onboarding_turn_id: str | None = None
     created_at: datetime = field(default_factory=utc_now)
     updated_at: datetime = field(default_factory=utc_now)
 
@@ -73,6 +76,23 @@ class SessionState:
         self.mode = ChatMode(self.mode)
         if self.repo_root is not None and not isinstance(self.repo_root, Path):
             self.repo_root = Path(self.repo_root)
+
+    @property
+    def scratchpad(self) -> "Scratchpad":
+        """Backward-compat alias that always exposes ``teaching_scratchpad``.
+
+        Old callers and tests still read/write ``state.scratchpad``; the deep
+        research loop now owns its own ``research_scratchpad`` slot, selected
+        by ``TurnRuntime`` based on mode. Keeping this property readable AND
+        writable preserves legacy semantics: ``state.scratchpad = x`` rebinds
+        the teaching ledger, never the research one.
+        """
+
+        return self.teaching_scratchpad
+
+    @scratchpad.setter
+    def scratchpad(self, value: "Scratchpad") -> None:
+        self.teaching_scratchpad = value
 
     def touch(self) -> None:
         """Refresh the session timestamp without changing ownership of any state field."""
