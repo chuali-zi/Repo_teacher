@@ -51,7 +51,9 @@ class TeacherAgent(BaseAgent):
                 user_prompt,
                 system_prompt=system_prompt,
                 temperature=0.5,
-                max_tokens=5000,
+                # FIX-08 (user override): request 2.5× of 5000 = 12500 without
+                # client-side clamping; let the provider clamp/reject if needed.
+                max_tokens=12500,
             )
             chunks.append(text)
         else:
@@ -59,7 +61,9 @@ class TeacherAgent(BaseAgent):
                 user_prompt,
                 system_prompt=system_prompt,
                 temperature=0.5,
-                max_tokens=5000,
+                # FIX-08 (user override): request 2.5× of 5000 = 12500 without
+                # client-side clamping; let the provider clamp/reject if needed.
+                max_tokens=12500,
             ):
                 chunks.append(chunk)
                 await on_chunk(chunk)

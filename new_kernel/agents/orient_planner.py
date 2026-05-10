@@ -44,7 +44,8 @@ class OrientPlanner(BaseAgent):
             system_prompt=system_prompt,
             response_format={"type": "json_object"},
             temperature=0.1,
-            max_tokens=1200,
+            # FIX-08: 2.5× of 1200 per user request to avoid mid-output truncation.
+            max_tokens=3000,
         )
         return self._parse_plan(response, question=question)
 

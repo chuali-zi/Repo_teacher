@@ -72,7 +72,8 @@ class Investigator(BaseResearchAgent):
                 system_prompt=self.get_prompt("system"),
                 response_format={"type": "json_object"},
                 temperature=0.1,
-                max_tokens=600,
+                # FIX-08: 2.5× of 600 per user request to avoid mid-output truncation.
+                max_tokens=1500,
             )
         except Exception:
             return _fallback_parse_failure()

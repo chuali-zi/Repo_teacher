@@ -49,7 +49,8 @@ class SidecarExplainer(BaseAgent):
             user_prompt,
             system_prompt=system_prompt,
             temperature=0.2,
-            max_tokens=360,
+            # FIX-08: 2.5× of 360 per user request to avoid mid-output truncation.
+            max_tokens=900,
         )
         related_paths = [current_file] if current_file else []
         return SidecarExplainData(

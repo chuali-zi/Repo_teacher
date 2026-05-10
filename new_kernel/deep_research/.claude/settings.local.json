@@ -50,7 +50,10 @@
       "Bash(python -m pytest -q new_kernel/tests/test_*.py --ignore=new_kernel/tests/tmp_run --ignore=new_kernel/tests/pytest_tmp_run)",
       "Bash(python -m compileall -q new_kernel/deep_research new_kernel/turn)",
       "PowerShell(python -m compileall new_kernel\\\\deep_research\\\\agents\\\\composer.py)",
-      "PowerShell(python -m compileall C:\\\\Users\\\\chual\\\\vibe\\\\Irene\\\\new_kernel\\\\deep_research\\\\agents\\\\composer.py)"
+      "PowerShell(python -m compileall C:\\\\Users\\\\chual\\\\vibe\\\\Irene\\\\new_kernel\\\\deep_research\\\\agents\\\\composer.py)",
+      "Bash(python -m compileall -q new_kernel/agents new_kernel/deep_research/agents new_kernel/api)",
+      "Bash(python -m compileall -q new_kernel/deep_research/agents/composer.py new_kernel/agents/teacher.py)",
+      "Bash(python -m compileall -q new_kernel/agents/teacher.py)"
     ]
   }
 }

@@ -223,7 +223,8 @@ def _make_summarizer(llm_client: Any | None):
             ),
             system_prompt="你是只读代码摘要器，输出简洁中文摘要，不超过 200 字。",
             temperature=0.2,
-            max_tokens=320,
+            # FIX-08: 2.5× of 320 per user request to avoid mid-output truncation.
+            max_tokens=800,
         )
 
     return _summarize

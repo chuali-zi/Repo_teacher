@@ -50,7 +50,8 @@ class ReadingAgent(BaseAgent):
             system_prompt=system_prompt,
             response_format={"type": "json_object"},
             temperature=0.1,
-            max_tokens=900,
+            # FIX-08: 2.5× of 900 per user request to avoid mid-output truncation.
+            max_tokens=2250,
         )
         return self._parse_decision(response, valid_actions=valid_actions)
 

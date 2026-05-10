@@ -58,7 +58,8 @@ class NoteTaker(BaseResearchAgent):
             user_prompt,
             system_prompt=self.get_prompt("system"),
             temperature=0.4,
-            max_tokens=500,
+            # FIX-08: 2.5× of 500 per user request to avoid mid-output truncation.
+            max_tokens=1250,
         )
         text = _sanitize_note(raw, success=success, subtopic=subtopic, tool_input=tool_input)
         return SubtopicNote(text=text, success=success, anchor_path=anchor_path, anchor_lines=anchor_lines)

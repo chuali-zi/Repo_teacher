@@ -104,7 +104,8 @@ class Decomposer(BaseResearchAgent):
                 system_prompt=self.get_prompt("system"),
                 response_format={"type": "json_object"},
                 temperature=0.2,
-                max_tokens=900,
+                # FIX-08: 2.5× of 900 per user request to avoid mid-output truncation.
+                max_tokens=2250,
             )
         except Exception:
             return _fallback_subtopics(report_shape, reachable=reachable)
