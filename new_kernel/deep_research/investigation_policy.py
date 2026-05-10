@@ -14,8 +14,10 @@ from dataclasses import dataclass, field
 class InvestigationPolicy:
     """Per-turn policy: round budget + consecutive-failure tracking + skip set."""
 
-    max_rounds: int = 2
-    max_consecutive_failures: int = 2
+    # FIX-10 (user override): bump from 2 to 4 — sub-topic ReAct 配额翻倍.
+    max_rounds: int = 4
+    # FIX-10 (user override): bump from 2 to 4 — 工具偶发失败时不要太快放弃 sub-topic.
+    max_consecutive_failures: int = 4
     failure_streak: int = 0
     skip_subtopic_ids: set[str] = field(default_factory=set)
 

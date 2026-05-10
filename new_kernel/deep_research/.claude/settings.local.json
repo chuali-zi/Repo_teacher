@@ -53,7 +53,10 @@
       "PowerShell(python -m compileall C:\\\\Users\\\\chual\\\\vibe\\\\Irene\\\\new_kernel\\\\deep_research\\\\agents\\\\composer.py)",
       "Bash(python -m compileall -q new_kernel/agents new_kernel/deep_research/agents new_kernel/api)",
       "Bash(python -m compileall -q new_kernel/deep_research/agents/composer.py new_kernel/agents/teacher.py)",
-      "Bash(python -m compileall -q new_kernel/agents/teacher.py)"
+      "Bash(python -m compileall -q new_kernel/agents/teacher.py)",
+      "Bash(python -m compileall new_kernel\\\\deep_research new_kernel\\\\agents new_kernel\\\\api)",
+      "PowerShell(python -m compileall \"C:\\\\Users\\\\chual\\\\vibe\\\\Irene\\\\new_kernel\\\\deep_research\" \"C:\\\\Users\\\\chual\\\\vibe\\\\Irene\\\\new_kernel\\\\agents\" \"C:\\\\Users\\\\chual\\\\vibe\\\\Irene\\\\new_kernel\\\\api\")",
+      "PowerShell(Get-Content *)"
     ]
   }
 }

@@ -265,7 +265,8 @@ def _build_deep_research_loop(
         note_taker=note_taker,
         composer=composer,
         tool_runtime=tool_runtime,
-        max_rounds_per_subtopic=2,
+        # FIX-10 (user override): caller-side pin matches the new default (was 2).
+        max_rounds_per_subtopic=4,
         max_parallel_subtopics=1,
     )
 

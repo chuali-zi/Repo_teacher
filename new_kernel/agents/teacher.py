@@ -92,13 +92,64 @@ class TeacherAgent(BaseAgent):
         next_anchor_hint: Anchor | None,
     ) -> str:
         template = self.get_prompt("user_template", fallback=_DEFAULT_USER_TEMPLATE)
+        style_hint = _answer_style_hint(_classify_question_intent(question))
         return _safe_format(
             template,
             question=question,
             scratchpad_evidence=scratchpad.build_teacher_context(),
             previous_covered=_format_covered(previous_covered),
             next_anchor_hint=_format_anchor(next_anchor_hint),
+            answer_style_hint=style_hint,
         )
+
+
+_MACRO_KEYWORDS: tuple[str, ...] = (
+    "架构", "整体", "模块", "分工", "概览", "关系", "顶层",
+    "都有什么", "哪些模块", "怎么分", "组织结构", "划分", "边界",
+)
+_DETAIL_KEYWORDS: tuple[str, ...] = (
+    "怎么实现", "具体", "细节", "这段代码", "这块代码", "函数",
+    "方法", "流程", "字段", "参数", "实现", "为什么这么写",
+    "里面", "内部",
+)
+
+
+def _classify_question_intent(question: str) -> str:
+    """Soft classifier: returns 'macro' / 'detail' / 'mixed'.
+
+    Counts substring hits in a tiny Chinese keyword set. Ties or zero hits
+    yield 'mixed' so the user_template hint stays empty.
+    """
+
+    if not question:
+        return "mixed"
+    macro_hits = sum(1 for kw in _MACRO_KEYWORDS if kw in question)
+    detail_hits = sum(1 for kw in _DETAIL_KEYWORDS if kw in question)
+    if macro_hits > detail_hits and macro_hits > 0:
+        return "macro"
+    if detail_hits > macro_hits and detail_hits > 0:
+        return "detail"
+    return "mixed"
+
+
+def _answer_style_hint(intent: str) -> str:
+    """Map classified intent to a Chinese soft suggestion (or empty for mixed)."""
+
+    if intent == "macro":
+        return (
+            "学生这次问的是宏观层面的问题，"
+            "你这次回答更偏向把仓库的目录结构、模块分工、"
+            "依赖关系画清楚，少粘整段代码原文；"
+            "代码引用控制在 1-2 处即可。"
+        )
+    if intent == "detail":
+        return (
+            "学生这次问的是具体实现层面的问题，"
+            "你这次回答更偏向把实际源码片段（带 path:line）"
+            "和关键 symbol 摆出来，多引用代码，"
+            "目录抽象只在最后一句简短交代。"
+        )
+    return ""  # mixed → empty, model uses its default voice
 
 
 def _extract_suggestion(text: str) -> list[str]:
@@ -151,6 +202,7 @@ _DEFAULT_USER_TEMPLATE = (
     "可用证据：\n{scratchpad_evidence}\n\n"
     "已讲过的点：\n{previous_covered}\n\n"
     "下一个教学点提示：\n{next_anchor_hint}\n\n"
+    "本轮回答风格倾向（软建议）：\n{answer_style_hint}\n\n"
     "请输出自然中文教学正文。"
 )
 

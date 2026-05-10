@@ -13,7 +13,9 @@ def test_bump_failure_streak_then_mark_skipped_resets() -> None:
     policy = InvestigationPolicy()
     policy.bump_failure()
     policy.bump_failure()
-    assert policy.failure_streak == 2
+    policy.bump_failure()
+    policy.bump_failure()
+    assert policy.failure_streak == 4
     assert policy.failure_streak >= policy.max_consecutive_failures
 
     policy.mark_skipped("arch")

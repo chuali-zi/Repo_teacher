@@ -221,7 +221,8 @@ class DeepResearchLoop:
         note_taker: NoteTaker,
         composer: Composer,
         tool_runtime: Any,
-        max_rounds_per_subtopic: int = 2,
+        # FIX-10 (user override): bump from 2 to 4 — 大仓库需要更多 ReAct 轮才能挖到关键代码.
+        max_rounds_per_subtopic: int = 4,
         max_parallel_subtopics: int = 1,
         event_factory: Any | None = None,
         message_id_factory: Callable[[], str] = _new_message_id,

@@ -83,7 +83,8 @@ class TeachingLoop:
         llm_client: Any | None = None,
         prompt_manager: Any | None = None,
         max_steps: int = 2,
-        max_react_iterations: int = 2,
+        # FIX-10 (user override): bump from 2 to 4 — chat per-step ReAct 配额翻倍.
+        max_react_iterations: int = 4,
         event_factory: Any | None = None,
     ) -> None:
         if tool_runtime is None:
